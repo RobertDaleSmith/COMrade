@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+
+      - name: Run tests
+        run: cargo test --workspace
+
+      - name: Run clippy
+        run: cargo clippy --workspace -- -D warnings
+
+  build:
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - args: '--target aarch64-apple-darwin'
+            arch: aarch64
+          - args: '--target x86_64-apple-darwin'
+            arch: x86_64
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: swatinem/rust-cache@v2
+
+      - name: Install frontend dependencies
+        working-directory: crates/comrade-app/ui
+        run: npm ci
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: crates/comrade-app
+          args: ${{ matrix.args }}
+          tagName: v__VERSION__
+          releaseName: 'COMrade v__VERSION__'
+          releaseBody: 'See assets to download and install.'
+          releaseDraft: true
+          prerelease: false
