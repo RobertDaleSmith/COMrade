@@ -1,0 +1,20 @@
+[package]
+name = "comrade-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "comrade"
+path = "src/main.rs"
+
+[dependencies]
+comrade-protocol = { workspace = true }
+comrade-core = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }

@@ -1,0 +1,18 @@
+[package]
+name = "comrade-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+comrade-protocol = { workspace = true }
+tokio = { workspace = true }
+tokio-serial = { workspace = true }
+serialport = { workspace = true }
+hidapi = { workspace = true }
+nusb = { workspace = true }
+bytes = { workspace = true }
+regex = { workspace = true }
+arc-swap = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }

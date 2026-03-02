@@ -1,0 +1,12 @@
+<svg viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background -->
+  <rect width="1024" height="1024" rx="228" fill="#181818"/>
+
+  <!-- > chevron -->
+  <path d="M 262 372 L 452 512 L 262 652"
+        stroke="#00e420" stroke-width="52" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+
+  <!-- ~ tilde -->
+  <path d="M 582 512 C 610 455, 655 455, 682 512 C 709 569, 754 569, 782 512"
+        stroke="#00e420" stroke-width="52" stroke-linecap="round" fill="none"/>
+</svg>
