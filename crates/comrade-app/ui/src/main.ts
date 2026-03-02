@@ -40,6 +40,7 @@ const hidReportId = document.getElementById("hid-report-id") as HTMLInputElement
 let terminal: TerminalUI | null = null;
 let descriptorPanel: DescriptorPanel | null = null;
 let connected = false;
+let wasConnected = false;
 let isHidMode = false;
 let userDisconnected = false;
 const history: string[] = [];
@@ -198,6 +199,7 @@ async function connectToPort(port: string): Promise<void> {
   }
   terminal.setConnecting(port);
   connected = false;
+  wasConnected = false;
 
   // Remember for reconnect.
   reconnectCtx = { type: "serial", port, baud };
@@ -213,12 +215,13 @@ async function connectToPort(port: string): Promise<void> {
     if (line.kind === "system") {
       if (line.text.startsWith("Connected to")) {
         connected = true;
+        wasConnected = true;
         terminal.setConnected(port, baud);
       } else if (line.text.startsWith("Disconnected:")) {
         connected = false;
         scheduleReconnect();
       } else if (line.text.startsWith("Error:")) {
-        if (!connected) {
+        if (!connected && wasConnected) {
           scheduleReconnect();
         }
       }
@@ -234,7 +237,9 @@ async function connectToPort(port: string): Promise<void> {
       kind: "system",
       rx_bytes_total: 0,
     });
-    scheduleReconnect();
+    if (wasConnected) {
+      scheduleReconnect();
+    }
   }
 
   inputEl.focus();
@@ -261,6 +266,7 @@ async function connectHid(hidPath: string, deviceName: string): Promise<void> {
   }
   terminal.setConnecting(deviceName);
   connected = false;
+  wasConnected = false;
   if (!descriptorPanel) {
     descriptorPanel = new DescriptorPanel();
   }
@@ -276,12 +282,15 @@ async function connectHid(hidPath: string, deviceName: string): Promise<void> {
     if (report.kind === "error") {
       connected = false;
       terminal.appendHidReport(report);
-      scheduleReconnect();
+      if (wasConnected) {
+        scheduleReconnect();
+      }
       return;
     }
 
     if (!connected) {
       connected = true;
+      wasConnected = true;
       terminal.setHidConnected(deviceName);
     }
 
@@ -291,6 +300,7 @@ async function connectHid(hidPath: string, deviceName: string): Promise<void> {
   try {
     await invoke("connect_hid", { hidPath, onReport: reportChannel });
     connected = true;
+    wasConnected = true;
     terminal.setHidConnected(deviceName);
   } catch (e) {
     terminal.appendLine({
@@ -299,7 +309,9 @@ async function connectHid(hidPath: string, deviceName: string): Promise<void> {
       kind: "system",
       rx_bytes_total: 0,
     });
-    scheduleReconnect();
+    if (wasConnected) {
+      scheduleReconnect();
+    }
   }
 
   inputEl.focus();
