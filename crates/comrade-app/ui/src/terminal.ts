@@ -45,25 +45,38 @@ export class TerminalUI {
       this.autoScroll = atBottom;
     });
 
+    // Block the default browser context menu globally (no Reload / Inspect).
+    document.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+    });
+
     // Build context menu.
     this.contextMenu = document.createElement("div");
     this.contextMenu.className = "ctx-menu hidden";
     this.contextMenu.innerHTML =
+      '<div class="ctx-item" data-action="copy">Copy</div>' +
       '<div class="ctx-item" data-action="clear-above">Clear Above</div>' +
       '<div class="ctx-item" data-action="clear-below">Clear Below</div>';
     document.body.appendChild(this.contextMenu);
 
     this.contextMenu.addEventListener("click", (e) => {
       const item = (e.target as HTMLElement).closest(".ctx-item") as HTMLElement | null;
-      if (!item || !this.contextTarget) return;
+      if (!item) return;
       const action = item.dataset.action;
-      if (action === "clear-above") {
-        while (this.contextTarget.previousElementSibling) {
-          this.contextTarget.previousElementSibling.remove();
+      if (action === "copy") {
+        const sel = window.getSelection();
+        if (sel && sel.toString()) {
+          navigator.clipboard.writeText(sel.toString());
         }
-      } else if (action === "clear-below") {
-        while (this.contextTarget.nextElementSibling) {
-          this.contextTarget.nextElementSibling.remove();
+      } else if (this.contextTarget) {
+        if (action === "clear-above") {
+          while (this.contextTarget.previousElementSibling) {
+            this.contextTarget.previousElementSibling.remove();
+          }
+        } else if (action === "clear-below") {
+          while (this.contextTarget.nextElementSibling) {
+            this.contextTarget.nextElementSibling.remove();
+          }
         }
       }
       this.hideContextMenu();
@@ -72,7 +85,6 @@ export class TerminalUI {
     this.output.addEventListener("contextmenu", (e) => {
       const line = (e.target as HTMLElement).closest(".line") as HTMLElement | null;
       if (!line) return;
-      e.preventDefault();
       this.contextTarget = line;
       this.contextMenu.style.left = `${e.clientX}px`;
       this.contextMenu.style.top = `${e.clientY}px`;
@@ -89,11 +101,6 @@ export class TerminalUI {
     });
 
     document.addEventListener("click", () => this.hideContextMenu());
-    document.addEventListener("contextmenu", (e) => {
-      if (!(e.target as HTMLElement).closest("#output")) {
-        this.hideContextMenu();
-      }
-    });
   }
 
   private hideContextMenu(): void {
