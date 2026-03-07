@@ -1,9 +1,14 @@
 use std::ffi::CString;
+use std::io::Read;
+use std::time::Duration;
 
 use chrono::Local;
+use nusb::descriptors::TransferType;
+use nusb::transfer::{Direction, In, Interrupt};
+use nusb::MaybeFuture;
 use serde::Serialize;
 use tokio::sync::mpsc;
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 
 /// A report received from a HID device, sent to the frontend via Tauri Channel.
 #[derive(Debug, Clone, Serialize)]
@@ -34,7 +39,15 @@ pub struct HidSession {
 impl HidSession {
     /// Open a HID device by path. Spawns a blocking read loop that streams
     /// reports via the `on_report` callback. Returns the session handle.
-    pub async fn open<F>(hid_path: String, on_report: F) -> Result<Self, String>
+    ///
+    /// `vid` and `pid` are used as a fallback to locate the device via nusb
+    /// when hidapi cannot read input reports (e.g. composite CDC+HID on macOS).
+    pub async fn open<F>(
+        hid_path: String,
+        vid: u16,
+        pid: u16,
+        on_report: F,
+    ) -> Result<Self, String>
     where
         F: Fn(HidReport) + Send + 'static,
     {
@@ -65,10 +78,13 @@ impl HidSession {
         // Move device into the blocking read loop thread.
         // HidDevice is Send but not Sync, so it lives exclusively in one thread.
         tokio::task::spawn_blocking(move || {
-            Self::read_loop(device, cmd_rx, on_report);
+            Self::read_loop(device, vid, pid, cmd_rx, on_report);
         });
 
-        debug!("HID session opened: {hid_path} (descriptor {} bytes)", raw_descriptor_clone.len());
+        debug!(
+            "HID session opened: {hid_path} (descriptor {} bytes)",
+            raw_descriptor_clone.len()
+        );
 
         Ok(Self {
             cmd_tx,
@@ -104,6 +120,8 @@ impl HidSession {
 
     fn read_loop<F>(
         device: hidapi::HidDevice,
+        vid: u16,
+        pid: u16,
         mut cmd_rx: mpsc::Receiver<HidCommand>,
         on_report: F,
     ) where
@@ -113,6 +131,51 @@ impl HidSession {
         let mut report_count: u64 = 0;
         let mut rx_bytes_total: u64 = 0;
 
+        // Test read — detect devices where hidapi can't receive reports.
+        // Some composite CDC+HID devices on macOS fail here with IOHidManager.
+        match device.read_timeout(&mut buf, 500) {
+            Ok(n) if n > 0 => {
+                // First report succeeded — process it and continue with hidapi.
+                process_report(&buf[..n], &mut report_count, &mut rx_bytes_total, &on_report);
+            }
+            Ok(_) => {
+                // Timeout (device idle) — hidapi seems fine, continue.
+            }
+            Err(e) => {
+                // hidapi read failed — fall back to nusb.
+                warn!("hidapi read failed ({e}), falling back to nusb");
+                drop(device);
+                match open_nusb_reader(vid, pid) {
+                    Ok(mut reader) => {
+                        nusb_read_loop(
+                            &mut reader,
+                            &mut cmd_rx,
+                            &mut report_count,
+                            &mut rx_bytes_total,
+                            &on_report,
+                        );
+                    }
+                    Err(e) => {
+                        error!("nusb fallback failed: {e}");
+                        let now = Local::now().format("%H:%M:%S%.3f").to_string();
+                        on_report(HidReport {
+                            timestamp: now,
+                            data: Vec::new(),
+                            hex: format!("nusb fallback failed: {e}"),
+                            ascii: String::new(),
+                            report_id: None,
+                            report_count,
+                            rx_bytes_total,
+                            kind: "error",
+                        });
+                    }
+                }
+                debug!("HID read loop ended (reports={report_count}, bytes={rx_bytes_total})");
+                return;
+            }
+        }
+
+        // hidapi read loop — continues when the test read succeeded or timed out.
         loop {
             // Check for commands (non-blocking).
             match cmd_rx.try_recv() {
@@ -154,25 +217,7 @@ impl HidSession {
                     // Timeout, no data — loop back to check commands.
                 }
                 Ok(n) => {
-                    let data = buf[..n].to_vec();
-                    report_count += 1;
-                    rx_bytes_total += n as u64;
-
-                    let now = Local::now().format("%H:%M:%S%.3f").to_string();
-                    let report_id = if n > 0 { Some(data[0]) } else { None };
-                    let hex = format_hex(&data);
-                    let ascii = format_ascii(&data);
-
-                    on_report(HidReport {
-                        timestamp: now,
-                        data,
-                        hex,
-                        ascii,
-                        report_id,
-                        report_count,
-                        rx_bytes_total,
-                        kind: "input",
-                    });
+                    process_report(&buf[..n], &mut report_count, &mut rx_bytes_total, &on_report);
                 }
                 Err(e) => {
                     error!("HID read error: {e}");
@@ -194,6 +239,156 @@ impl HidSession {
 
         debug!("HID read loop ended (reports={report_count}, bytes={rx_bytes_total})");
     }
+}
+
+/// Process a single HID report and send it via the callback.
+fn process_report<F>(
+    data: &[u8],
+    report_count: &mut u64,
+    rx_bytes_total: &mut u64,
+    on_report: &F,
+) where
+    F: Fn(HidReport),
+{
+    let n = data.len();
+    let data = data.to_vec();
+    *report_count += 1;
+    *rx_bytes_total += n as u64;
+
+    let now = Local::now().format("%H:%M:%S%.3f").to_string();
+    let report_id = if n > 0 { Some(data[0]) } else { None };
+    let hex = format_hex(&data);
+    let ascii = format_ascii(&data);
+
+    on_report(HidReport {
+        timestamp: now,
+        data,
+        hex,
+        ascii,
+        report_id,
+        report_count: *report_count,
+        rx_bytes_total: *rx_bytes_total,
+        kind: "input",
+    });
+}
+
+/// Open a nusb interrupt IN reader for the HID interface of a device.
+fn open_nusb_reader(
+    vid: u16,
+    pid: u16,
+) -> Result<nusb::io::EndpointRead<Interrupt>, String> {
+    let dev_info = nusb::list_devices()
+        .wait()
+        .map_err(|e| format!("nusb enumerate: {e}"))?
+        .find(|d| d.vendor_id() == vid && d.product_id() == pid)
+        .ok_or("Device not found via nusb")?;
+
+    let device = dev_info
+        .open()
+        .wait()
+        .map_err(|e| format!("nusb open: {e}"))?;
+
+    let config = device
+        .active_configuration()
+        .map_err(|e| format!("nusb config: {e}"))?;
+
+    // Find HID interface (class 0x03) with an interrupt IN endpoint.
+    let (intf_num, ep_addr) = config
+        .interface_alt_settings()
+        .filter(|i| i.class() == 0x03)
+        .find_map(|i| {
+            i.endpoints()
+                .find(|e| {
+                    e.transfer_type() == TransferType::Interrupt
+                        && e.direction() == Direction::In
+                })
+                .map(|e| (i.interface_number(), e.address()))
+        })
+        .ok_or("No HID interrupt IN endpoint found")?;
+
+    info!("nusb: claiming interface {intf_num}, endpoint 0x{ep_addr:02X}");
+
+    let interface = device
+        .detach_and_claim_interface(intf_num)
+        .wait()
+        .map_err(|e| format!("nusb claim interface {intf_num}: {e}"))?;
+
+    let endpoint = interface
+        .endpoint::<Interrupt, In>(ep_addr)
+        .map_err(|e| format!("nusb endpoint: {e}"))?;
+
+    let max_packet = endpoint.max_packet_size();
+    Ok(endpoint
+        .reader(max_packet)
+        .with_read_timeout(Duration::from_millis(100)))
+}
+
+/// Read loop using nusb, same structure as the hidapi loop but via std::io::Read.
+fn nusb_read_loop<F>(
+    reader: &mut nusb::io::EndpointRead<Interrupt>,
+    cmd_rx: &mut mpsc::Receiver<HidCommand>,
+    report_count: &mut u64,
+    rx_bytes_total: &mut u64,
+    on_report: &F,
+) where
+    F: Fn(HidReport),
+{
+    info!("nusb: read loop started");
+    let mut buf = vec![0u8; 4096];
+
+    loop {
+        // Check for commands (non-blocking).
+        match cmd_rx.try_recv() {
+            Ok(HidCommand::Stop) => {
+                debug!("nusb read loop: stop command received");
+                break;
+            }
+            Ok(HidCommand::SendOutputReport { .. }) => {
+                warn!("Output reports not supported in nusb fallback mode");
+            }
+            Ok(HidCommand::SendFeatureReport { .. }) => {
+                warn!("Feature reports not supported in nusb fallback mode");
+            }
+            Err(mpsc::error::TryRecvError::Empty) => {}
+            Err(mpsc::error::TryRecvError::Disconnected) => {
+                debug!("nusb read loop: command channel closed");
+                break;
+            }
+        }
+
+        // Read with timeout (set via with_read_timeout on the reader).
+        match reader.read(&mut buf) {
+            Ok(0) => {
+                // No data.
+            }
+            Ok(n) => {
+                process_report(&buf[..n], report_count, rx_bytes_total, on_report);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+                // Timeout — loop back to check commands.
+            }
+            Err(e) => {
+                error!("nusb read error: {e}");
+                let now = Local::now().format("%H:%M:%S%.3f").to_string();
+                on_report(HidReport {
+                    timestamp: now,
+                    data: Vec::new(),
+                    hex: format!("nusb read error: {e}"),
+                    ascii: String::new(),
+                    report_id: None,
+                    report_count: *report_count,
+                    rx_bytes_total: *rx_bytes_total,
+                    kind: "error",
+                });
+                break;
+            }
+        }
+    }
+
+    debug!(
+        "nusb read loop ended (reports={}, bytes={})",
+        report_count, rx_bytes_total
+    );
 }
 
 fn format_hex(data: &[u8]) -> String {

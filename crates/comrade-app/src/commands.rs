@@ -1,14 +1,17 @@
 use std::sync::Arc;
 
+use chrono::Local;
 use comrade_core::{enumerate_devices, Engine};
 use comrade_protocol::{Command, DeviceInfo, Event, SerialConfig};
 use tauri::ipc::Channel;
 use tauri::State;
 use tokio::sync::Mutex;
 
+use crate::connection_status::StatusTracker;
 use crate::hid_descriptor::{self, HidDescriptorInfo};
 use crate::hid_session::{HidReport, HidSession};
 use crate::line_assembler::{LineAssembler, SerialLine};
+use crate::log_buffer::{LogBuffer, LogEntry};
 
 /// Active connection — either Serial, HID, or nothing.
 enum ActiveConnection {
@@ -68,6 +71,8 @@ pub async fn connect(
     baud: u32,
     on_line: Channel<SerialLine>,
     state: State<'_, SharedState>,
+    log_buffer: State<'_, Arc<LogBuffer>>,
+    status_tracker: State<'_, Arc<StatusTracker>>,
 ) -> Result<(), String> {
     let mut app = state.lock().await;
 
@@ -94,8 +99,12 @@ pub async fn connect(
 
     app.connection = ActiveConnection::Serial { engine, assembler };
 
+    status_tracker.set_serial(&port, baud);
+
     // Spawn a task that streams engine events → line assembler → Channel.
     let state_clone = state.inner().clone();
+    let log_buf = log_buffer.inner().clone();
+    let status = status_tracker.inner().clone();
     tokio::spawn(async move {
         loop {
             // Use a timeout so we can flush partial lines that don't end with \n.
@@ -115,6 +124,8 @@ pub async fn connect(
                         }
                     };
                     for line in lines {
+                        log_buf.push(LogEntry::Serial(line.clone()));
+                        status.update_rx_bytes(line.rx_bytes_total);
                         if on_line.send(line).is_err() {
                             return;
                         }
@@ -132,6 +143,7 @@ pub async fn connect(
                             continue;
                         }
                     };
+                    log_buf.push(LogEntry::Serial(line.clone()));
                     let _ = on_line.send(line);
                 }
                 Ok(Ok(Event::Disconnected { reason, .. })) => {
@@ -151,8 +163,10 @@ pub async fn connect(
                         }
                     };
                     for line in lines {
+                        log_buf.push(LogEntry::Serial(line.clone()));
                         let _ = on_line.send(line);
                     }
+                    status.set_disconnected();
                     return;
                 }
                 Ok(Ok(Event::Error { message, .. })) => {
@@ -164,6 +178,7 @@ pub async fn connect(
                             continue;
                         }
                     };
+                    log_buf.push(LogEntry::Serial(line.clone()));
                     let _ = on_line.send(line);
                 }
                 Ok(Ok(Event::Shutdown)) | Ok(Err(_)) => return,
@@ -179,6 +194,7 @@ pub async fn connect(
                         }
                     };
                     if let Some(line) = partial {
+                        log_buf.push(LogEntry::Serial(line.clone()));
                         let _ = on_line.send(line);
                     }
                 }
@@ -192,18 +208,30 @@ pub async fn connect(
 #[tauri::command]
 pub async fn connect_hid(
     hid_path: String,
+    vid: u16,
+    pid: u16,
     on_report: Channel<HidReport>,
     state: State<'_, SharedState>,
+    log_buffer: State<'_, Arc<LogBuffer>>,
+    status_tracker: State<'_, Arc<StatusTracker>>,
 ) -> Result<(), String> {
     let mut app = state.lock().await;
 
     // Shut down existing connection.
     shutdown_active(&mut app.connection).await;
 
-    let session = HidSession::open(hid_path, move |report| {
-        let _ = on_report.send(report);
+    let log_buf = log_buffer.inner().clone();
+    let status = status_tracker.inner().clone();
+
+    let hid_path_clone = hid_path.clone();
+    let session = HidSession::open(hid_path, vid, pid, move |report| {
+        let _ = on_report.send(report.clone());
+        log_buf.push(LogEntry::Hid(report.clone()));
+        status.update_rx_bytes(report.rx_bytes_total);
     })
     .await?;
+
+    status_tracker.set_hid(&hid_path_clone, None);
 
     app.connection = ActiveConnection::Hid { session };
 
@@ -214,6 +242,7 @@ pub async fn connect_hid(
 pub async fn send_data(
     text: String,
     state: State<'_, SharedState>,
+    log_buffer: State<'_, Arc<LogBuffer>>,
 ) -> Result<(), String> {
     // Grab a clone of the engine sender under the lock, then drop it.
     let engine_send = {
@@ -223,6 +252,15 @@ pub async fn send_data(
             _ => return Err("Not connected (serial)".to_string()),
         }
     };
+
+    // Log the sent line (don't feed through the shared assembler — that
+    // would corrupt its partial-receive buffer).
+    log_buffer.push(LogEntry::Serial(SerialLine {
+        timestamp: Local::now().format("%H:%M:%S%.3f").to_string(),
+        text: text.clone(),
+        kind: "sent",
+        rx_bytes_total: 0,
+    }));
 
     // Send to device with newline.
     let mut data = text.into_bytes();
@@ -266,9 +304,13 @@ pub async fn get_hid_descriptor(
 }
 
 #[tauri::command]
-pub async fn disconnect(state: State<'_, SharedState>) -> Result<(), String> {
+pub async fn disconnect(
+    state: State<'_, SharedState>,
+    status_tracker: State<'_, Arc<StatusTracker>>,
+) -> Result<(), String> {
     let mut app = state.lock().await;
     shutdown_active(&mut app.connection).await;
+    status_tracker.set_disconnected();
     Ok(())
 }
 

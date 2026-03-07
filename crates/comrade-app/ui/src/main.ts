@@ -67,6 +67,8 @@ let reconnectCtx: {
   type: "hid";
   hidPath: string;
   deviceName: string;
+  vid: number;
+  pid: number;
 } | null = null;
 
 // ---- Device list auto-refresh ----
@@ -154,7 +156,7 @@ async function refreshDevices(): Promise<void> {
         hidBtn.textContent = "Connect HID";
         hidBtn.addEventListener("click", (e) => {
           e.stopPropagation();
-          connectHid(dev.hid_path!, dev.product || dev.manufacturer || "HID Device");
+          connectHid(dev.hid_path!, dev.product || dev.manufacturer || "HID Device", dev.vid ?? 0, dev.pid ?? 0);
         });
 
         btns.appendChild(serialBtn);
@@ -164,7 +166,7 @@ async function refreshDevices(): Promise<void> {
         div.addEventListener("click", () => connectToPort(dev.serial_path || dev.path));
       } else {
         div.addEventListener("click", () =>
-          connectHid(dev.hid_path || dev.path, dev.product || dev.manufacturer || "HID Device")
+          connectHid(dev.hid_path || dev.path, dev.product || dev.manufacturer || "HID Device", dev.vid ?? 0, dev.pid ?? 0)
         );
       }
 
@@ -247,7 +249,7 @@ async function connectToPort(port: string): Promise<void> {
 
 // ---- HID connection ----
 
-async function connectHid(hidPath: string, deviceName: string): Promise<void> {
+async function connectHid(hidPath: string, deviceName: string, vid: number, pid: number): Promise<void> {
   stopDeviceListPolling();
   stopReconnect();
   userDisconnected = false;
@@ -272,7 +274,7 @@ async function connectHid(hidPath: string, deviceName: string): Promise<void> {
   }
 
   // Remember for reconnect.
-  reconnectCtx = { type: "hid", hidPath, deviceName };
+  reconnectCtx = { type: "hid", hidPath, deviceName, vid, pid };
 
   // Create channel for streaming reports.
   reportChannel = new Channel<HidReport>();
@@ -298,7 +300,7 @@ async function connectHid(hidPath: string, deviceName: string): Promise<void> {
   };
 
   try {
-    await invoke("connect_hid", { hidPath, onReport: reportChannel });
+    await invoke("connect_hid", { hidPath, vid, pid, onReport: reportChannel });
     connected = true;
     wasConnected = true;
     terminal.setHidConnected(deviceName);
@@ -332,7 +334,7 @@ function scheduleReconnect(): void {
     if (reconnectCtx.type === "serial") {
       await connectToPort(reconnectCtx.port);
     } else {
-      await connectHid(reconnectCtx.hidPath, reconnectCtx.deviceName);
+      await connectHid(reconnectCtx.hidPath, reconnectCtx.deviceName, reconnectCtx.vid, reconnectCtx.pid);
     }
   }, 2000);
 }

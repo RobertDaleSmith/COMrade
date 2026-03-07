@@ -21,8 +21,14 @@ chrono = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 hidapi = { workspace = true }
+nusb = { workspace = true }
 hidreport = "0.6"
 hut = "0.5"
+rmcp = { workspace = true }
+axum = { workspace = true }
+schemars = { workspace = true }
+tokio-util = { workspace = true }
+regex = { workspace = true }
 
 [features]
 default = ["custom-protocol"]

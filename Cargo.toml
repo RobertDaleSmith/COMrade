@@ -72,3 +72,9 @@ dirs = "6"
 
 # Time
 chrono = { version = "0.4", features = ["serde"] }
+
+# MCP server
+rmcp = { version = "1.1", features = ["server", "macros", "transport-streamable-http-server"] }
+axum = "0.8"
+schemars = "1"
+tokio-util = { version = "0.7", features = ["rt"] }
