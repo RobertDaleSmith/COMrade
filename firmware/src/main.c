@@ -1,12 +1,12 @@
 /**
  * COMrade UART Bridge
  *
- * Bridges USB CDC ↔ UART via PIO on any two GPIOs.
- * Auto-detects TX/RX orientation: plug the two wires in either way and it
- * figures out which pin is connected to the remote device's TX line.
+ * Bridges USB CDC ↔ UART via PIO on any RP2040 board.
+ * Auto-detects which GPIO pair has UART wired to it and which pin is
+ * TX vs RX.  Just plug two adjacent GPIOs + GND into the target device
+ * and the firmware figures out the rest.
  *
- * Pin pair is set at build time via BRIDGE_PIN_A / BRIDGE_PIN_B.
- * Defaults: Pico = 0,1 — KB2040 = 12,13
+ * Baud rate is set at build time (default 115200).
  */
 
 #include <stdio.h>
@@ -19,21 +19,16 @@
 #include "uart_tx.pio.h"
 #include "uart_rx.pio.h"
 
-// ---- Build-time pin configuration ----
-
-#ifndef BRIDGE_PIN_A
-#define BRIDGE_PIN_A 0
-#endif
-
-#ifndef BRIDGE_PIN_B
-#define BRIDGE_PIN_B 1
-#endif
+// ---- Configuration ----
 
 #ifndef BRIDGE_BAUD
 #define BRIDGE_BAUD 115200
 #endif
 
-// ---- LED (optional status indicator) ----
+// Number of usable GPIOs to scan (RP2040 has GPIO 0–29).
+#define NUM_GPIO 30
+
+// ---- LED ----
 
 #ifndef BRIDGE_LED_PIN
 #ifdef PICO_DEFAULT_LED_PIN
@@ -43,31 +38,61 @@
 #endif
 #endif
 
-// ---- Auto-detect which pin is RX (remote device's TX) ----
+// ---- Auto-detect UART pin pair ----
 
 /**
- * Monitor both pins for UART start bits (falling edges).
- * UART idle = HIGH. The pin connected to the remote TX will go LOW first.
- * Returns the pin that saw activity (= our RX pin).
- * Blinks LED while waiting.
+ * Scan all GPIOs for UART activity (start bits).
+ *
+ * Sets every GPIO as input with pull-up, then watches for falling edges.
+ * UART idle is HIGH; only the pin connected to the remote device's TX will
+ * pulse LOW.  Once detected, the adjacent GPIO is assumed to be TX.
+ *
+ * To avoid false triggers from noise on floating pins, we require a full
+ * UART frame: start bit LOW, then the line must return HIGH (stop bit)
+ * within one character time (~87 µs at 115200 baud for 10 bits).
+ *
+ * Blinks LED while scanning.  Sets pin_rx and pin_tx on success.
  */
-static int detect_rx_pin(uint pin_a, uint pin_b) {
-    // Configure both as inputs with pull-ups (UART idle is HIGH).
-    gpio_init(pin_a);
-    gpio_set_dir(pin_a, GPIO_IN);
-    gpio_pull_up(pin_a);
+static void detect_pins(uint *pin_rx, uint *pin_tx) {
+    // Init all GPIOs as inputs with pull-up.
+    for (uint i = 0; i < NUM_GPIO; i++) {
+        // Skip the LED pin.
+        if ((int)i == BRIDGE_LED_PIN) continue;
+        gpio_init(i);
+        gpio_set_dir(i, GPIO_IN);
+        gpio_pull_up(i);
+    }
 
-    gpio_init(pin_b);
-    gpio_set_dir(pin_b, GPIO_IN);
-    gpio_pull_up(pin_b);
+    // One character time in µs: 10 bits (start + 8 data + stop) at BRIDGE_BAUD.
+    const uint32_t char_time_us = (10 * 1000000) / BRIDGE_BAUD;
 
     bool led_on = false;
     absolute_time_t next_blink = make_timeout_time_ms(250);
 
     while (true) {
-        // Check for LOW (start bit) on either pin.
-        if (!gpio_get(pin_a)) return pin_a;
-        if (!gpio_get(pin_b)) return pin_b;
+        for (uint i = 0; i < NUM_GPIO; i++) {
+            if ((int)i == BRIDGE_LED_PIN) continue;
+            if (gpio_get(i)) continue;
+
+            // Saw a LOW — potential start bit.  Wait one character time
+            // and check that the line returns HIGH (valid stop bit).
+            sleep_us(char_time_us);
+            if (!gpio_get(i)) continue;  // Still LOW — not a UART frame, skip.
+
+            // Valid frame detected on GPIO i.  That's our RX.
+            *pin_rx = i;
+
+            // TX is the adjacent pin.  Prefer i+1; fall back to i-1.
+            if (i + 1 < NUM_GPIO && (int)(i + 1) != BRIDGE_LED_PIN) {
+                *pin_tx = i + 1;
+            } else if (i > 0 && (int)(i - 1) != BRIDGE_LED_PIN) {
+                *pin_tx = i - 1;
+            } else {
+                // Edge case: no valid neighbor.  Shouldn't happen in practice.
+                *pin_tx = (i + 1) % NUM_GPIO;
+            }
+            return;
+        }
 
         // Blink LED while scanning.
         if (BRIDGE_LED_PIN >= 0 && time_reached(next_blink)) {
@@ -87,15 +112,12 @@ static uint sm_tx;
 static uint sm_rx;
 
 static void bridge_init(uint pin_tx, uint pin_rx, uint baud) {
-    // Claim two state machines.
     sm_tx = pio_claim_unused_sm(pio, true);
     sm_rx = pio_claim_unused_sm(pio, true);
 
-    // Load PIO programs.
     uint offset_tx = pio_add_program(pio, &uart_tx_program);
     uint offset_rx = pio_add_program(pio, &uart_rx_program);
 
-    // Initialize TX and RX.
     uart_tx_program_init(pio, sm_tx, offset_tx, pin_tx, baud);
     uart_rx_program_init(pio, sm_rx, offset_rx, pin_rx, baud);
 }
@@ -103,52 +125,45 @@ static void bridge_init(uint pin_tx, uint pin_rx, uint baud) {
 // ---- Main ----
 
 int main() {
-    // Init USB CDC stdio.
     stdio_init_all();
 
-    // Init LED if available.
     if (BRIDGE_LED_PIN >= 0) {
         gpio_init(BRIDGE_LED_PIN);
         gpio_set_dir(BRIDGE_LED_PIN, GPIO_OUT);
         gpio_put(BRIDGE_LED_PIN, 0);
     }
 
-    // Wait for USB host to connect.
     while (!stdio_usb_connected())
         sleep_ms(50);
 
-    printf("[bridge] COMrade UART Bridge\n");
-    printf("[bridge] Pins: %d, %d @ %d baud\n", BRIDGE_PIN_A, BRIDGE_PIN_B, BRIDGE_BAUD);
-    printf("[bridge] Detecting TX/RX orientation...\n");
+    printf("[bridge] COMrade UART Bridge @ %d baud\n", BRIDGE_BAUD);
+    printf("[bridge] Scanning all GPIOs for UART activity...\n");
 
-    // Auto-detect which pin is RX.
-    uint pin_rx = detect_rx_pin(BRIDGE_PIN_A, BRIDGE_PIN_B);
-    uint pin_tx = (pin_rx == BRIDGE_PIN_A) ? BRIDGE_PIN_B : BRIDGE_PIN_A;
+    uint pin_rx, pin_tx;
+    detect_pins(&pin_rx, &pin_tx);
 
     printf("[bridge] Detected: RX=GPIO%d  TX=GPIO%d\n", pin_rx, pin_tx);
 
-    // Solid LED = connected and bridging.
+    // Solid LED = bridge active.
     if (BRIDGE_LED_PIN >= 0)
         gpio_put(BRIDGE_LED_PIN, 1);
 
-    // Start PIO UART.
     bridge_init(pin_tx, pin_rx, BRIDGE_BAUD);
 
-    // Bridge loop: forward bytes in both directions.
+    // Bridge loop.
     while (true) {
-        // PIO UART RX → USB CDC TX
+        // PIO UART RX → USB CDC
         while (!pio_sm_is_rx_fifo_empty(pio, sm_rx)) {
             char c = (char)(pio->rxf[sm_rx] >> 24);
             putchar_raw(c);
         }
 
-        // USB CDC RX → PIO UART TX
+        // USB CDC → PIO UART TX
         int ch;
         while ((ch = getchar_timeout_us(0)) != PICO_ERROR_TIMEOUT) {
             uart_tx_program_putc(pio, sm_tx, (char)ch);
         }
 
-        // Yield briefly to avoid busy-spinning at 100% CPU.
         tight_loop_contents();
     }
 
