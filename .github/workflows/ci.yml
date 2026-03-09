@@ -24,16 +24,13 @@ jobs:
 
   build:
     needs: test
-    if: github.ref == 'refs/heads/main'
-    permissions:
-      contents: write
     strategy:
       fail-fast: false
       matrix:
         include:
-          - args: '--target aarch64-apple-darwin'
+          - target: aarch64-apple-darwin
             arch: aarch64
-          - args: '--target x86_64-apple-darwin'
+          - target: x86_64-apple-darwin
             arch: x86_64
     runs-on: macos-latest
     steps:
@@ -45,22 +42,29 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
+          targets: ${{ matrix.target }}
 
       - uses: swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.arch }}
 
       - name: Install frontend dependencies
         working-directory: crates/comrade-app/ui
         run: npm ci
 
-      - uses: tauri-apps/tauri-action@v0
+      - name: Build app
+        uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           projectPath: crates/comrade-app
-          args: ${{ matrix.args }}
-          tagName: v__VERSION__
-          releaseName: 'COMrade v__VERSION__'
-          releaseBody: 'See assets to download and install.'
-          releaseDraft: true
-          prerelease: false
+          args: --target ${{ matrix.target }}
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: COMrade-${{ matrix.arch }}
+          path: |
+            target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+            target/${{ matrix.target }}/release/bundle/macos/*.app
+          if-no-files-found: error
