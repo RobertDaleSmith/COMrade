@@ -32,6 +32,12 @@
         </label>
         <button id="refresh-btn">Refresh</button>
       </div>
+      <div class="mcp-info">
+        <span class="mcp-dot"></span>
+        MCP server running —
+        <code id="mcp-cmd">claude mcp add --transport http comrade http://127.0.0.1:9712/mcp</code>
+        <button id="mcp-copy-btn" title="Copy command">Copy</button>
+      </div>
     </div>
 
     <!-- Terminal (shown when connected) -->
@@ -45,10 +51,18 @@
         </div>
         <div id="toolbar-actions">
           <button id="descriptor-btn" class="hidden" title="Show HID descriptor">Descriptor</button>
+          <button id="search-btn" title="Search (⌘F)">Search</button>
           <button id="copy-btn" title="Copy log (⌘⇧C)">Copy</button>
           <button id="clear-btn" title="Clear log (⌘K)">Clear</button>
           <button id="disconnect-btn" title="Disconnect">Disconnect</button>
         </div>
+      </div>
+      <div id="search-bar" class="hidden">
+        <input type="text" id="search-input" placeholder="Search logs..." autocomplete="off" spellcheck="false" />
+        <span id="search-count"></span>
+        <button id="search-prev" title="Previous (Shift+Enter)">&#x25B2;</button>
+        <button id="search-next" title="Next (Enter)">&#x25BC;</button>
+        <button id="search-close" title="Close (Escape)">&times;</button>
       </div>
       <div id="terminal-body">
         <div id="output"></div>

@@ -31,6 +31,12 @@ export class TerminalUI {
   private contextMenu: HTMLElement;
   private contextTarget: HTMLElement | null = null;
 
+  // Search state.
+  private searchQuery = "";
+  private searchMatches: HTMLElement[] = [];
+  private currentMatchIndex = -1;
+  private searchActive = false;
+
   constructor() {
     this.output = document.getElementById("output")!;
     this.statusPort = document.getElementById("status-port")!;
@@ -125,6 +131,10 @@ export class TerminalUI {
     div.appendChild(text);
     this.output.appendChild(div);
 
+    if (this.searchActive) {
+      this.applySearchToLine(div);
+    }
+
     // Update RX counter.
     this.statusRx.textContent = `RX: ${this.formatBytes(line.rx_bytes_total)}`;
 
@@ -158,6 +168,10 @@ export class TerminalUI {
     div.appendChild(text);
     this.output.appendChild(div);
 
+    if (this.searchActive) {
+      this.applySearchToLine(div);
+    }
+
     // Update RX counter with report count.
     this.statusRx.textContent = `RX: ${this.formatBytes(report.rx_bytes_total)} (${report.report_count} reports)`;
 
@@ -167,6 +181,9 @@ export class TerminalUI {
   /** Clear all output lines. */
   clear(): void {
     this.output.innerHTML = "";
+    this.searchMatches = [];
+    this.currentMatchIndex = -1;
+    this.updateSearchCount();
   }
 
   /** Set connection info in the status bar for serial. */
@@ -221,6 +238,164 @@ export class TerminalUI {
     }
   }
 
+  /** Activate search mode. Caller is responsible for showing the search bar. */
+  startSearch(): void {
+    this.searchActive = true;
+  }
+
+  /** Deactivate search mode and clear all highlights/dimming. */
+  endSearch(): void {
+    this.searchActive = false;
+    this.searchQuery = "";
+    this.searchMatches = [];
+    this.currentMatchIndex = -1;
+
+    for (const div of Array.from(this.output.querySelectorAll(".line"))) {
+      this.restoreLine(div as HTMLElement);
+    }
+  }
+
+  /** Update the search query and re-highlight all lines. */
+  updateSearch(query: string): void {
+    this.searchQuery = query;
+    this.searchMatches = [];
+    this.currentMatchIndex = -1;
+
+    const lines = this.output.querySelectorAll(".line");
+    if (!query) {
+      for (const div of Array.from(lines)) {
+        this.restoreLine(div as HTMLElement);
+      }
+      this.updateSearchCount();
+      return;
+    }
+
+    for (const div of Array.from(lines)) {
+      this.applySearchToLine(div as HTMLElement);
+    }
+
+    if (this.searchMatches.length > 0) {
+      this.currentMatchIndex = 0;
+      this.highlightCurrentMatch();
+    }
+    this.updateSearchCount();
+  }
+
+  /** Navigate to the next match. */
+  nextMatch(): void {
+    if (this.searchMatches.length === 0) return;
+    this.clearCurrentMark();
+    this.currentMatchIndex = (this.currentMatchIndex + 1) % this.searchMatches.length;
+    this.highlightCurrentMatch();
+    this.updateSearchCount();
+  }
+
+  /** Navigate to the previous match. */
+  prevMatch(): void {
+    if (this.searchMatches.length === 0) return;
+    this.clearCurrentMark();
+    this.currentMatchIndex = (this.currentMatchIndex - 1 + this.searchMatches.length) % this.searchMatches.length;
+    this.highlightCurrentMatch();
+    this.updateSearchCount();
+  }
+
+  /** Apply search highlighting/dimming to a single line div. */
+  private applySearchToLine(div: HTMLElement): void {
+    const textEl = div.querySelector(".text") as HTMLElement | null;
+    if (!textEl) return;
+
+    // Get plain text — use stored original if available, else current textContent.
+    const plain = textEl.dataset.plainText ?? textEl.textContent ?? "";
+    textEl.dataset.plainText = plain;
+
+    if (!this.searchQuery) {
+      textEl.textContent = plain;
+      div.classList.remove("search-dim");
+      return;
+    }
+
+    const highlighted = this.highlightText(plain, this.searchQuery);
+    if (highlighted !== null) {
+      textEl.innerHTML = highlighted;
+      div.classList.remove("search-dim");
+      this.searchMatches.push(div);
+      this.updateSearchCount();
+    } else {
+      textEl.textContent = plain;
+      div.classList.add("search-dim");
+    }
+  }
+
+  /** Restore a line to plain text and remove dimming. */
+  private restoreLine(div: HTMLElement): void {
+    div.classList.remove("search-dim");
+    const textEl = div.querySelector(".text") as HTMLElement | null;
+    if (!textEl) return;
+    const plain = textEl.dataset.plainText ?? textEl.textContent ?? "";
+    textEl.textContent = plain;
+    delete textEl.dataset.plainText;
+  }
+
+  /** HTML-escape text and wrap case-insensitive matches in <mark>. Returns null if no match. */
+  private highlightText(text: string, query: string): string | null {
+    const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const re = new RegExp(escaped, "gi");
+    let match: RegExpExecArray | null;
+    const parts: string[] = [];
+    let last = 0;
+    let found = false;
+
+    while ((match = re.exec(text)) !== null) {
+      found = true;
+      parts.push(this.escapeHtml(text.slice(last, match.index)));
+      parts.push(`<mark>${this.escapeHtml(match[0])}</mark>`);
+      last = match.index + match[0].length;
+    }
+
+    if (!found) return null;
+    parts.push(this.escapeHtml(text.slice(last)));
+    return parts.join("");
+  }
+
+  /** Escape HTML special characters. */
+  private escapeHtml(s: string): string {
+    return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }
+
+  /** Add .current class to the first <mark> in the current match line and scroll to it. */
+  private highlightCurrentMatch(): void {
+    if (this.currentMatchIndex < 0 || this.currentMatchIndex >= this.searchMatches.length) return;
+    const div = this.searchMatches[this.currentMatchIndex];
+    const mark = div.querySelector("mark");
+    if (mark) {
+      mark.classList.add("current");
+      mark.scrollIntoView({ block: "center", behavior: "smooth" });
+    }
+  }
+
+  /** Remove .current class from the previous match's mark. */
+  private clearCurrentMark(): void {
+    if (this.currentMatchIndex < 0 || this.currentMatchIndex >= this.searchMatches.length) return;
+    const div = this.searchMatches[this.currentMatchIndex];
+    const mark = div.querySelector("mark.current");
+    if (mark) mark.classList.remove("current");
+  }
+
+  /** Update the search count display element. */
+  private updateSearchCount(): void {
+    const el = document.getElementById("search-count");
+    if (!el) return;
+    if (!this.searchActive || !this.searchQuery) {
+      el.textContent = "";
+      return;
+    }
+    if (this.searchMatches.length === 0) {
+      el.textContent = "No matches";
+    } else {
+      el.textContent = `${this.currentMatchIndex + 1} of ${this.searchMatches.length}`;
+    }
+  }
+
   /** Scroll to the bottom of the output. */
   scrollToBottom(): void {
     this.autoScroll = true;
@@ -229,7 +404,18 @@ export class TerminalUI {
 
   private trimAndScroll(): void {
     while (this.output.children.length > this.maxLines) {
-      this.output.removeChild(this.output.firstChild!);
+      const removed = this.output.firstChild! as HTMLElement;
+      if (this.searchActive) {
+        const idx = this.searchMatches.indexOf(removed);
+        if (idx !== -1) {
+          this.searchMatches.splice(idx, 1);
+          if (this.currentMatchIndex >= idx) {
+            this.currentMatchIndex = Math.max(0, this.currentMatchIndex - 1);
+          }
+          this.updateSearchCount();
+        }
+      }
+      this.output.removeChild(removed);
     }
     if (this.autoScroll) {
       this.output.scrollTop = this.output.scrollHeight;

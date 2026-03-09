@@ -27,14 +27,18 @@ pub fn run() {
     let mcp_log_buffer = log_buffer.clone();
     let mcp_status_tracker = status_tracker.clone();
 
+    let shared_state = Arc::new(Mutex::new(AppState::new())) as SharedState;
+    let mcp_shared_state = shared_state.clone();
+
     tauri::Builder::default()
-        .manage(Arc::new(Mutex::new(AppState::new())) as SharedState)
+        .manage(shared_state)
         .manage(log_buffer)
         .manage(status_tracker)
         .setup(|_app| {
             tauri::async_runtime::spawn(mcp::start_mcp_server(
                 mcp_log_buffer,
                 mcp_status_tracker,
+                mcp_shared_state,
             ));
             Ok(())
         })

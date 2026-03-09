@@ -14,7 +14,7 @@ use crate::line_assembler::{LineAssembler, SerialLine};
 use crate::log_buffer::{LogBuffer, LogEntry};
 
 /// Active connection — either Serial, HID, or nothing.
-enum ActiveConnection {
+pub(crate) enum ActiveConnection {
     None,
     Serial {
         engine: Engine,
@@ -27,7 +27,7 @@ enum ActiveConnection {
 
 /// Shared application state managed by Tauri.
 pub struct AppState {
-    connection: ActiveConnection,
+    pub(crate) connection: ActiveConnection,
 }
 
 impl AppState {

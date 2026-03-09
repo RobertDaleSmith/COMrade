@@ -43,6 +43,7 @@ body {
   justify-content: center;
   height: 100%;
   padding: 40px;
+  border-top: 2px solid var(--accent-red);
 }
 
 #port-select.hidden {
@@ -234,6 +235,53 @@ body {
 #disconnect-btn:hover {
   background: var(--bg-elevated);
   box-shadow: 0 0 6px rgba(215, 38, 38, 0.25);
+}
+
+/* ---- MCP info banner ---- */
+
+.mcp-info {
+  margin-top: 16px;
+  font-family: var(--font-ui);
+  font-size: 12px;
+  color: var(--fg-tertiary);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mcp-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #3fb950;
+  flex-shrink: 0;
+}
+
+.mcp-info code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  background: var(--bg-elevated);
+  padding: 2px 6px;
+  border-radius: 3px;
+  color: var(--fg-secondary);
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.mcp-info button {
+  font-family: var(--font-ui);
+  font-size: 11px;
+  background: var(--bg-elevated);
+  color: var(--fg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 2px 8px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.mcp-info button:hover {
+  color: var(--fg-primary);
 }
 
 .no-ports {
@@ -549,6 +597,79 @@ body {
 
 .panel-content.hidden {
   display: none;
+}
+
+/* ---- Search bar ---- */
+
+#search-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+#search-bar.hidden {
+  display: none;
+}
+
+#search-input {
+  flex: 1;
+  background: transparent;
+  color: var(--fg-primary);
+  border: none;
+  outline: none;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  caret-color: var(--accent-red);
+}
+
+#search-input::placeholder {
+  color: var(--fg-tertiary);
+}
+
+#search-count {
+  font-family: var(--font-ui);
+  font-size: 11px;
+  color: var(--fg-tertiary);
+  white-space: nowrap;
+}
+
+#search-bar button {
+  background: transparent;
+  color: var(--fg-secondary);
+  border: 1px solid transparent;
+  border-radius: 3px;
+  padding: 2px 6px;
+  font-size: 12px;
+  cursor: pointer;
+  font-family: var(--font-ui);
+  line-height: 1;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+#search-bar button:hover {
+  background: var(--bg-elevated);
+  color: var(--fg-primary);
+  border-color: var(--border);
+}
+
+/* Search highlights */
+
+.line.search-dim {
+  opacity: 0.25;
+}
+
+.line mark {
+  background: var(--accent-orange);
+  color: var(--bg-deep);
+  border-radius: 2px;
+}
+
+.line mark.current {
+  background: var(--accent-red);
 }
 
 /* ---- Context menu ---- */

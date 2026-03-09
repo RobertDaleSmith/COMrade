@@ -32,6 +32,12 @@ const copyBtn = document.getElementById("copy-btn")!;
 const clearBtn = document.getElementById("clear-btn")!;
 const disconnectBtn = document.getElementById("disconnect-btn")!;
 const descriptorBtn = document.getElementById("descriptor-btn")!;
+const searchBtn = document.getElementById("search-btn")!;
+const searchBar = document.getElementById("search-bar")!;
+const searchInput = document.getElementById("search-input") as HTMLInputElement;
+const searchCloseBtn = document.getElementById("search-close")!;
+const searchPrevBtn = document.getElementById("search-prev")!;
+const searchNextBtn = document.getElementById("search-next")!;
 const hidInputControls = document.getElementById("hid-input-controls")!;
 const hidReportType = document.getElementById("hid-report-type") as HTMLSelectElement;
 const hidReportId = document.getElementById("hid-report-id") as HTMLInputElement;
@@ -54,6 +60,7 @@ let reportChannel: Channel<HidReport> | null = null;
 // Timers.
 let deviceListTimer: ReturnType<typeof setInterval> | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
 // Last device list snapshot for diffing (avoid flicker on no-change refresh).
 let lastDeviceListJson = "";
@@ -201,7 +208,6 @@ async function connectToPort(port: string): Promise<void> {
   }
   terminal.setConnecting(port);
   connected = false;
-  wasConnected = false;
 
   // Remember for reconnect.
   reconnectCtx = { type: "serial", port, baud };
@@ -268,7 +274,6 @@ async function connectHid(hidPath: string, deviceName: string, vid: number, pid:
   }
   terminal.setConnecting(deviceName);
   connected = false;
-  wasConnected = false;
   if (!descriptorPanel) {
     descriptorPanel = new DescriptorPanel();
   }
@@ -364,6 +369,7 @@ function showPortSelect(): void {
   terminalEl.classList.add("hidden");
   portSelectEl.classList.remove("hidden");
   connected = false;
+  wasConnected = false;
   isHidMode = false;
   terminal = null;
   descriptorPanel = null;
@@ -485,6 +491,54 @@ async function toggleDescriptor(): Promise<void> {
   }
 }
 
+// ---- Search ----
+
+function openSearch(): void {
+  if (!terminal) return;
+  searchBar.classList.remove("hidden");
+  terminal.startSearch();
+  searchInput.focus();
+  searchInput.select();
+}
+
+function closeSearch(): void {
+  searchBar.classList.add("hidden");
+  searchInput.value = "";
+  terminal?.endSearch();
+  inputEl.focus();
+}
+
+searchInput.addEventListener("input", () => {
+  if (searchDebounceTimer !== null) clearTimeout(searchDebounceTimer);
+  searchDebounceTimer = setTimeout(() => {
+    terminal?.updateSearch(searchInput.value);
+  }, 100);
+});
+
+searchInput.addEventListener("keydown", (e: KeyboardEvent) => {
+  if (e.key === "Enter" && e.shiftKey) {
+    e.preventDefault();
+    terminal?.prevMatch();
+  } else if (e.key === "Enter") {
+    e.preventDefault();
+    terminal?.nextMatch();
+  } else if (e.key === "Escape") {
+    e.preventDefault();
+    closeSearch();
+  }
+});
+
+searchCloseBtn.addEventListener("click", closeSearch);
+searchPrevBtn.addEventListener("click", () => terminal?.prevMatch());
+searchNextBtn.addEventListener("click", () => terminal?.nextMatch());
+searchBtn.addEventListener("click", () => {
+  if (searchBar.classList.contains("hidden")) {
+    openSearch();
+  } else {
+    closeSearch();
+  }
+});
+
 // ---- Keyboard shortcuts ----
 
 inputEl.addEventListener("keydown", (e: KeyboardEvent) => {
@@ -526,6 +580,10 @@ document.addEventListener("keydown", (e: KeyboardEvent) => {
     e.preventDefault();
     copyLog();
   }
+  if ((e.metaKey || e.ctrlKey) && e.key === "f") {
+    e.preventDefault();
+    if (terminal) openSearch();
+  }
 });
 
 // ---- Copy log ----
@@ -538,6 +596,17 @@ async function copyLog(): Promise<void> {
     setTimeout(() => (copyBtn.textContent = "Copy"), 1500);
   }
 }
+
+// ---- MCP copy ----
+
+const mcpCopyBtn = document.getElementById("mcp-copy-btn")!;
+const mcpCmd = document.getElementById("mcp-cmd")!;
+
+mcpCopyBtn.addEventListener("click", async () => {
+  await navigator.clipboard.writeText(mcpCmd.textContent!);
+  mcpCopyBtn.textContent = "Copied!";
+  setTimeout(() => (mcpCopyBtn.textContent = "Copy"), 1500);
+});
 
 // ---- Event listeners ----
 

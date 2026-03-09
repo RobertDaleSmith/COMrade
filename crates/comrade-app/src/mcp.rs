@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use chrono::Local;
+use comrade_protocol::Command;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::*;
@@ -9,8 +11,10 @@ use rmcp::transport::streamable_http_server::{
 use rmcp::{schemars, tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler};
 use tracing::{info, warn};
 
+use crate::commands::{ActiveConnection, SharedState};
 use crate::connection_status::StatusTracker;
-use crate::log_buffer::LogBuffer;
+use crate::line_assembler::SerialLine;
+use crate::log_buffer::{LogBuffer, LogEntry};
 
 // ── Parameter structs ────────────────────────────────────────────────
 
@@ -30,21 +34,43 @@ pub struct SearchLogsParams {
     pub max_results: Option<usize>,
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct SendSerialParams {
+    #[schemars(description = "Text to send to the serial device (newline appended automatically)")]
+    pub text: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct SendHidReportParams {
+    #[schemars(description = "Byte array to send (first byte is report ID)")]
+    pub data: Vec<u8>,
+    #[schemars(
+        description = "Report type: 'output' (default) or 'feature'"
+    )]
+    pub report_type: Option<String>,
+}
+
 // ── MCP Handler ──────────────────────────────────────────────────────
 
 #[derive(Clone)]
 pub struct ComradeMcp {
     log_buffer: Arc<LogBuffer>,
     status_tracker: Arc<StatusTracker>,
+    shared_state: SharedState,
     tool_router: ToolRouter<Self>,
 }
 
 #[tool_router]
 impl ComradeMcp {
-    pub fn new(log_buffer: Arc<LogBuffer>, status_tracker: Arc<StatusTracker>) -> Self {
+    pub fn new(
+        log_buffer: Arc<LogBuffer>,
+        status_tracker: Arc<StatusTracker>,
+        shared_state: SharedState,
+    ) -> Self {
         Self {
             log_buffer,
             status_tracker,
+            shared_state,
             tool_router: Self::tool_router(),
         }
     }
@@ -130,6 +156,72 @@ impl ComradeMcp {
         let json = serde_json::to_string_pretty(&filtered).unwrap_or_default();
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
+
+    #[tool(description = "Clear all log entries from the buffer.")]
+    fn clear_logs(&self) -> Result<CallToolResult, McpError> {
+        self.log_buffer.clear();
+        Ok(CallToolResult::success(vec![Content::text(
+            "Logs cleared.",
+        )]))
+    }
+
+    #[tool(description = "Send text to the connected serial device. A newline is appended automatically.")]
+    async fn send_serial(
+        &self,
+        Parameters(params): Parameters<SendSerialParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let cmd_tx = {
+            let app = self.shared_state.lock().await;
+            match &app.connection {
+                ActiveConnection::Serial { engine, .. } => engine.cmd_sender(),
+                _ => {
+                    return Err(McpError::invalid_request(
+                        "Not connected (serial)".to_string(),
+                        None,
+                    ))
+                }
+            }
+        };
+
+        self.log_buffer.push(LogEntry::Serial(SerialLine {
+            timestamp: Local::now().format("%H:%M:%S%.3f").to_string(),
+            text: params.text.clone(),
+            kind: "sent",
+            rx_bytes_total: 0,
+        }));
+
+        let mut data = params.text.into_bytes();
+        data.push(b'\n');
+        cmd_tx
+            .send(Command::Send { data })
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        Ok(CallToolResult::success(vec![Content::text("Sent.")]))
+    }
+
+    #[tool(description = "Send a HID report to the connected HID device. The first byte of the data array is the report ID.")]
+    async fn send_hid_report(
+        &self,
+        Parameters(params): Parameters<SendHidReportParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let app = self.shared_state.lock().await;
+        match &app.connection {
+            ActiveConnection::Hid { session } => {
+                let report_type = params.report_type.as_deref().unwrap_or("output");
+                let result = match report_type {
+                    "feature" => session.send_feature_report(params.data).await,
+                    _ => session.send_output_report(params.data).await,
+                };
+                result.map_err(|e| McpError::internal_error(e, None))?;
+                Ok(CallToolResult::success(vec![Content::text("Sent.")]))
+            }
+            _ => Err(McpError::invalid_request(
+                "Not connected (HID)".to_string(),
+                None,
+            )),
+        }
+    }
 }
 
 #[tool_handler]
@@ -144,7 +236,10 @@ impl ServerHandler for ComradeMcp {
             .with_instructions(
                 "COMrade serial/HID monitor. Use get_logs to read device output, \
                  search_logs to find specific patterns, get_status to check the \
-                 current connection, and list_devices to see available ports."
+                 current connection, list_devices to see available ports, \
+                 clear_logs to reset the log buffer, send_serial to send text \
+                 to a serial device, and send_hid_report to send a HID report \
+                 to a HID device."
                     .to_string(),
             )
     }
@@ -152,13 +247,25 @@ impl ServerHandler for ComradeMcp {
 
 // ── Server startup ───────────────────────────────────────────────────
 
-pub async fn start_mcp_server(log_buffer: Arc<LogBuffer>, status_tracker: Arc<StatusTracker>) {
+pub async fn start_mcp_server(
+    log_buffer: Arc<LogBuffer>,
+    status_tracker: Arc<StatusTracker>,
+    shared_state: SharedState,
+) {
     let ct = tokio_util::sync::CancellationToken::new();
 
     let service = StreamableHttpService::new(
-        move || Ok(ComradeMcp::new(log_buffer.clone(), status_tracker.clone())),
+        move || {
+            Ok(ComradeMcp::new(
+                log_buffer.clone(),
+                status_tracker.clone(),
+                shared_state.clone(),
+            ))
+        },
         LocalSessionManager::default().into(),
         StreamableHttpServerConfig {
+            stateful_mode: false,
+            json_response: true,
             cancellation_token: ct.child_token(),
             ..Default::default()
         },
