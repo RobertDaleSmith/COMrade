@@ -48,10 +48,6 @@ jobs:
         with:
           key: ${{ matrix.arch }}
 
-      - name: Install frontend dependencies
-        working-directory: crates/comrade-app/ui
-        run: npm ci
-
       - name: Build app
         uses: tauri-apps/tauri-action@v0
         env:

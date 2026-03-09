@@ -87,10 +87,6 @@ jobs:
       - name: Sync version into manifests
         run: bash scripts/sync-version.sh
 
-      - name: Install frontend dependencies
-        working-directory: crates/comrade-app/ui
-        run: npm ci
-
       - name: Build signed app
         uses: tauri-apps/tauri-action@v0
         env:

@@ -3,9 +3,9 @@
   "version": "0.1.0",
   "identifier": "com.comrade.serial-monitor",
   "build": {
-    "beforeDevCommand": "npm run dev",
+    "beforeDevCommand": "cd ui && npm run dev",
     "devUrl": "http://localhost:1421",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "cd ui && npm install && npm run build",
     "frontendDist": "ui/dist"
   },
   "app": {
