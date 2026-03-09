@@ -1,4 +1,5 @@
 /target
 node_modules/
 crates/comrade-app/ui/dist/
+firmware/*/build/
 .DS_Store
