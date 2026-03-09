@@ -41,15 +41,20 @@ jobs:
     needs: check-version
     if: needs.check-version.outputs.tag_exists == 'false'
     runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: app
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: app
 
       - name: Sync version into manifests
-        run: bash scripts/sync-version.sh
+        run: bash ../scripts/sync-version.sh
 
       - name: Run tests
         run: cargo test --workspace
@@ -82,6 +87,7 @@ jobs:
 
       - uses: swatinem/rust-cache@v2
         with:
+          workspaces: app
           key: release-${{ matrix.arch }}
 
       - name: Sync version into manifests
@@ -99,7 +105,7 @@ jobs:
           # APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           # APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
-          projectPath: crates/comrade-app
+          projectPath: app/crates/comrade-app
           args: --target ${{ matrix.target }}
           tagName: ${{ needs.check-version.outputs.tag }}
           releaseName: COMrade ${{ needs.check-version.outputs.tag }}

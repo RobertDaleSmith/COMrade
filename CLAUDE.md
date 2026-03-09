@@ -2,9 +2,21 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Repository Layout
+
+```
+app/          Rust workspace — Tauri GUI, CLI, core engine, protocol types
+firmware/     RP2040 firmware — UART bridge with auto-detect TX/RX
+scripts/      Build helpers (sync-version.sh)
+docs/         Architecture and design docs
+```
+
 ## Build & Test Commands
 
 ```bash
+# All cargo commands run from app/
+cd app
+
 # Build
 cargo build --workspace              # Debug build, all crates
 cargo build --release                # Release build
@@ -21,7 +33,7 @@ cargo clippy --workspace -- -D warnings
 make dev                             # cargo tauri dev (live reload)
 make build                           # cargo tauri build (.app bundle)
 
-# Frontend (run from crates/comrade-app/ui/)
+# Frontend (run from app/crates/comrade-app/ui/)
 npm install                          # Install frontend deps
 npm run build                        # tsc + vite build
 
@@ -60,7 +72,10 @@ Two modes: **TUI** (ratatui + crossterm) and **raw** (`--raw`, writes bytes to s
 ### comrade-app
 Tauri v2 GUI. `AppState` holds an `ActiveConnection` enum (None | Serial | Hid). Tauri commands (`#[tauri::command]`) handle both serial (via Engine) and HID (via `HidSession`). Streaming data flows through Tauri `Channel<T>` (not Tauri events). The `LineAssembler` buffers serial bytes into complete lines; HID reports are sent as atomic `HidReport` structs.
 
-Frontend: vanilla TypeScript + Vite at `crates/comrade-app/ui/`. Port selector → terminal view with scrolling output, status bar, input bar. `TerminalUI` class manages display.
+Frontend: vanilla TypeScript + Vite at `app/crates/comrade-app/ui/`. Port selector → terminal view with scrolling output, status bar, input bar. `TerminalUI` class manages display.
+
+### firmware/uart-bridge
+RP2040 PIO-based USB CDC ↔ UART bridge. Auto-detects TX/RX pin orientation. Build with Pico SDK, flash via UF2 drag-and-drop.
 
 ## Key Patterns
 

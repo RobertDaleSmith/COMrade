@@ -9,12 +9,17 @@ on:
 jobs:
   test:
     runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: app
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: app
 
       - name: Run tests
         run: cargo test --workspace
@@ -46,6 +51,7 @@ jobs:
 
       - uses: swatinem/rust-cache@v2
         with:
+          workspaces: app
           key: ${{ matrix.arch }}
 
       - name: Build app
@@ -53,7 +59,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          projectPath: crates/comrade-app
+          projectPath: app/crates/comrade-app
           args: --target ${{ matrix.target }}
 
       - name: Upload build artifact
@@ -61,6 +67,6 @@ jobs:
         with:
           name: COMrade-${{ matrix.arch }}
           path: |
-            target/${{ matrix.target }}/release/bundle/dmg/*.dmg
-            target/${{ matrix.target }}/release/bundle/macos/*.app
+            app/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+            app/target/${{ matrix.target }}/release/bundle/macos/*.app
           if-no-files-found: error
