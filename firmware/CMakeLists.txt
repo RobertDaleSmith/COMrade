@@ -8,23 +8,17 @@ set(CMAKE_CXX_STANDARD 17)
 
 pico_sdk_init()
 
-# Optional: override baud rate with -DBRIDGE_BAUD=9600
-if(BRIDGE_BAUD)
-    message(STATUS "Baud: ${BRIDGE_BAUD}")
-endif()
-
 add_executable(uart-bridge src/main.c)
 
 pico_generate_pio_header(uart-bridge ${CMAKE_CURRENT_LIST_DIR}/src/uart_tx.pio)
 pico_generate_pio_header(uart-bridge ${CMAKE_CURRENT_LIST_DIR}/src/uart_rx.pio)
 
-target_compile_definitions(uart-bridge PRIVATE
-    $<$<BOOL:${BRIDGE_BAUD}>:BRIDGE_BAUD=${BRIDGE_BAUD}>
-)
-
 target_link_libraries(uart-bridge PRIVATE
     pico_stdlib
     hardware_pio
+    hardware_flash
+    hardware_sync
+    hardware_watchdog
 )
 
 # USB CDC for serial, disable hardware UART stdio.

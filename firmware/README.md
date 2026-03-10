@@ -25,13 +25,7 @@ Requires the [Pico SDK](https://github.com/raspberrypi/pico-sdk).
 
 ```bash
 export PICO_SDK_PATH=~/pico-sdk
-
-mkdir build && cd build
-cmake ..
-make -j
-
-# Custom baud rate (default 115200)
-cmake .. -DBRIDGE_BAUD=9600
+make        # builds to firmware/build/uart-bridge.uf2
 ```
 
 ## Flashing
@@ -42,10 +36,34 @@ cmake .. -DBRIDGE_BAUD=9600
 
 One UF2 works on any RP2040 board (Pico, KB2040, etc.).
 
+## Configuration
+
+Send commands over USB CDC with the `$CB:` prefix. These are intercepted
+by the bridge and never forwarded to UART.
+
+| Command | Description |
+|---------|-------------|
+| `$CB:status` | Show current pins, baud, mode, LED |
+| `$CB:pins <a> <b>` | Set manual pin pair (reboot to apply) |
+| `$CB:auto` | Switch to auto-detect mode |
+| `$CB:baud <rate>` | Set baud rate (300–921600) |
+| `$CB:led <pin>` | Set LED pin (-1 to disable) |
+| `$CB:save` | Persist current config to flash |
+| `$CB:reset` | Factory reset and reboot |
+| `$CB:reboot` | Reboot the bridge |
+| `$CB:help` | Show command list |
+
+Settings take effect after reboot. Use `$CB:save` to persist across
+power cycles.
+
 ## LED Status
+
+On boards with a default LED (e.g. Pi Pico GPIO 25):
 
 - **Blinking** — scanning GPIOs for UART activity
 - **Solid** — bridge active, forwarding data
+
+The LED pin can be changed with `$CB:led <pin>`.
 
 ## How auto-detect works
 
@@ -54,3 +72,6 @@ One UF2 works on any RP2040 board (Pico, KB2040, etc.).
 3. It validates a full frame (line returns HIGH after one character time)
 4. The pin with valid UART data becomes RX; the adjacent pin becomes TX
 5. PIO UART is configured and bridging begins
+
+If pins are manually configured, auto-detect is limited to just those
+two pins (still detects TX/RX orientation automatically).
