@@ -57,6 +57,15 @@ impl StatusTracker {
         s.device_product = product.map(|p| p.to_string());
     }
 
+    pub fn set_ble_nus(&self, ble_id: &str) {
+        let mut s = self.inner.lock().unwrap();
+        s.state = "ble_nus".to_string();
+        s.device_path = Some(ble_id.to_string());
+        s.baud_rate = None;
+        s.rx_bytes = 0;
+        s.device_product = None;
+    }
+
     pub fn set_disconnected(&self) {
         *self.inner.lock().unwrap() = ConnectionStatus::disconnected();
     }

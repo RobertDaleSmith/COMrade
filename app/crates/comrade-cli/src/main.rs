@@ -156,6 +156,7 @@ fn list_ports() -> Result<()> {
             DeviceKind::Serial => "Serial",
             DeviceKind::Hid => "HID",
             DeviceKind::Both => "Serial+HID",
+            DeviceKind::Ble => "BLE",
         };
         println!("{:<30} {:<12} {:<10} {:<10} {}", dev.path, kind, vid, pid, desc);
     }

@@ -7,13 +7,14 @@ use tauri::ipc::Channel;
 use tauri::State;
 use tokio::sync::Mutex;
 
+use crate::ble_session::BleNusSession;
 use crate::connection_status::StatusTracker;
 use crate::hid_descriptor::{self, HidDescriptorInfo};
 use crate::hid_session::{HidReport, HidSession};
 use crate::line_assembler::{LineAssembler, SerialLine};
 use crate::log_buffer::{LogBuffer, LogEntry};
 
-/// Active connection — either Serial, HID, or nothing.
+/// Active connection — Serial, HID, BLE, or nothing.
 pub(crate) enum ActiveConnection {
     None,
     Serial {
@@ -22,6 +23,9 @@ pub(crate) enum ActiveConnection {
     },
     Hid {
         session: HidSession,
+    },
+    BleNus {
+        session: BleNusSession,
     },
 }
 
@@ -63,6 +67,11 @@ pub fn list_devices() -> Result<Vec<DeviceInfo>, String> {
         true
     });
     Ok(devices)
+}
+
+#[tauri::command]
+pub async fn scan_ble() -> Result<Vec<DeviceInfo>, String> {
+    crate::ble_session::list_ble_devices().await
 }
 
 #[tauri::command]
@@ -239,22 +248,38 @@ pub async fn connect_hid(
 }
 
 #[tauri::command]
+pub async fn connect_ble_nus(
+    ble_id: String,
+    on_line: Channel<SerialLine>,
+    state: State<'_, SharedState>,
+    log_buffer: State<'_, Arc<LogBuffer>>,
+    status_tracker: State<'_, Arc<StatusTracker>>,
+) -> Result<(), String> {
+    let mut app = state.lock().await;
+    shutdown_active(&mut app.connection).await;
+
+    let log_buf = log_buffer.inner().clone();
+    let status = status_tracker.inner().clone();
+
+    let session = BleNusSession::open(ble_id.clone(), move |line| {
+        log_buf.push(LogEntry::Serial(line.clone()));
+        status.update_rx_bytes(line.rx_bytes_total);
+        let _ = on_line.send(line);
+    })
+    .await?;
+
+    status_tracker.set_ble_nus(&ble_id);
+    app.connection = ActiveConnection::BleNus { session };
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn send_data(
     text: String,
     state: State<'_, SharedState>,
     log_buffer: State<'_, Arc<LogBuffer>>,
 ) -> Result<(), String> {
-    // Grab a clone of the engine sender under the lock, then drop it.
-    let engine_send = {
-        let app = state.lock().await;
-        match &app.connection {
-            ActiveConnection::Serial { engine, .. } => engine.cmd_sender(),
-            _ => return Err("Not connected (serial)".to_string()),
-        }
-    };
-
-    // Log the sent line (don't feed through the shared assembler — that
-    // would corrupt its partial-receive buffer).
+    // Log the sent line.
     log_buffer.push(LogEntry::Serial(SerialLine {
         timestamp: Local::now().format("%H:%M:%S%.3f").to_string(),
         text: text.clone(),
@@ -262,13 +287,25 @@ pub async fn send_data(
         rx_bytes_total: 0,
     }));
 
-    // Send to device with newline.
-    let mut data = text.into_bytes();
-    data.push(b'\n');
-    engine_send
-        .send(Command::Send { data })
-        .await
-        .map_err(|e| e.to_string())
+    let app = state.lock().await;
+    match &app.connection {
+        ActiveConnection::Serial { engine, .. } => {
+            let sender = engine.cmd_sender();
+            drop(app);
+            let mut data = text.into_bytes();
+            data.push(b'\n');
+            sender
+                .send(Command::Send { data })
+                .await
+                .map_err(|e| e.to_string())
+        }
+        ActiveConnection::BleNus { session } => {
+            let mut data = text.into_bytes();
+            data.push(b'\n');
+            session.send(data).await
+        }
+        _ => Err("Not connected (serial/NUS)".to_string()),
+    }
 }
 
 #[tauri::command]
@@ -320,6 +357,9 @@ async fn shutdown_active(conn: &mut ActiveConnection) {
             let _ = engine.send(Command::Shutdown).await;
         }
         ActiveConnection::Hid { session } => {
+            session.stop().await;
+        }
+        ActiveConnection::BleNus { session } => {
             session.stop().await;
         }
         ActiveConnection::None => {}

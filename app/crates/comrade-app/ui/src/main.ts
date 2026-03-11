@@ -12,12 +12,14 @@ interface DeviceInfo {
   serial_number: string | null;
   manufacturer: string | null;
   product: string | null;
-  kind: "Serial" | "Hid" | "Both";
+  kind: "Serial" | "Hid" | "Both" | "Ble";
   hid_usage: {
     usage_page: number;
     usage: number;
     usage_name: string | null;
   } | null;
+  ble_id: string | null;
+  ble_services: string[] | null;
 }
 
 // DOM elements.
@@ -76,6 +78,10 @@ let reconnectCtx: {
   deviceName: string;
   vid: number;
   pid: number;
+} | {
+  type: "ble_nus";
+  bleId: string;
+  deviceName: string;
 } | null = null;
 
 // ---- Device list auto-refresh ----
@@ -96,7 +102,11 @@ function stopDeviceListPolling(): void {
 
 async function refreshDevices(): Promise<void> {
   try {
-    const devices: DeviceInfo[] = await invoke("list_devices");
+    const [usbDevices, bleDevices] = await Promise.all([
+      invoke<DeviceInfo[]>("list_devices"),
+      invoke<DeviceInfo[]>("scan_ble").catch(() => []),
+    ]);
+    const devices: DeviceInfo[] = [...usbDevices, ...bleDevices];
     // Skip DOM rebuild if nothing changed.
     const json = JSON.stringify(devices);
     if (json === lastDeviceListJson) return;
@@ -120,8 +130,22 @@ async function refreshDevices(): Promise<void> {
 
       const badge = document.createElement("span");
       badge.className = `device-badge badge-${dev.kind.toLowerCase()}`;
-      badge.textContent =
-        dev.kind === "Both" ? "SERIAL+HID" : dev.kind.toUpperCase();
+      if (dev.kind === "Both") {
+        badge.textContent = "SERIAL+HID";
+      } else if (dev.kind === "Ble") {
+        const svcs = dev.ble_services || [];
+        if (svcs.includes("nus") && svcs.includes("hid")) {
+          badge.textContent = "BLE NUS+HID";
+        } else if (svcs.includes("nus")) {
+          badge.textContent = "BLE NUS";
+        } else if (svcs.includes("hid")) {
+          badge.textContent = "BLE HID";
+        } else {
+          badge.textContent = "BLE";
+        }
+      } else {
+        badge.textContent = dev.kind.toUpperCase();
+      }
 
       topRow.appendChild(name);
       topRow.appendChild(badge);
@@ -169,6 +193,10 @@ async function refreshDevices(): Promise<void> {
         btns.appendChild(serialBtn);
         btns.appendChild(hidBtn);
         div.appendChild(btns);
+      } else if (dev.kind === "Ble") {
+        const devName = dev.product || "BLE Device";
+        const bleId = dev.ble_id!;
+        div.addEventListener("click", () => connectBleNus(bleId, devName));
       } else if (dev.kind === "Serial") {
         div.addEventListener("click", () => connectToPort(dev.serial_path || dev.path));
       } else {
@@ -324,6 +352,67 @@ async function connectHid(hidPath: string, deviceName: string, vid: number, pid:
   inputEl.focus();
 }
 
+// ---- BLE NUS connection ----
+
+async function connectBleNus(bleId: string, deviceName: string): Promise<void> {
+  stopDeviceListPolling();
+  stopReconnect();
+  userDisconnected = false;
+  lastDeviceListJson = "";
+
+  portSelectEl.classList.add("hidden");
+  terminalEl.classList.remove("hidden");
+  isHidMode = false;
+  hidInputControls.classList.add("hidden");
+  descriptorBtn.classList.add("hidden");
+  inputEl.placeholder = "Type command, Enter to send";
+
+  if (!terminal) {
+    terminal = new TerminalUI();
+  }
+  terminal.setConnecting(deviceName);
+  connected = false;
+
+  reconnectCtx = { type: "ble_nus", bleId, deviceName };
+
+  lineChannel = new Channel<SerialLine>();
+  lineChannel.onmessage = (line: SerialLine) => {
+    if (!terminal) return;
+
+    terminal.appendLine(line);
+
+    if (line.kind === "system") {
+      if (line.text.includes("disconnected")) {
+        connected = false;
+        scheduleReconnect();
+      }
+    } else if (!connected) {
+      connected = true;
+      wasConnected = true;
+      terminal.setBleConnected(deviceName, "NUS");
+    }
+  };
+
+  try {
+    await invoke("connect_ble_nus", { bleId, onLine: lineChannel });
+    connected = true;
+    wasConnected = true;
+    terminal.setBleConnected(deviceName, "NUS");
+  } catch (e) {
+    terminal.appendLine({
+      timestamp: makeTimestamp(),
+      text: `Failed to connect: ${e}`,
+      kind: "system",
+      rx_bytes_total: 0,
+    });
+    if (wasConnected) {
+      scheduleReconnect();
+    }
+  }
+
+  inputEl.focus();
+}
+
 // ---- Reconnect ----
 
 function scheduleReconnect(): void {
@@ -338,8 +427,10 @@ function scheduleReconnect(): void {
 
     if (reconnectCtx.type === "serial") {
       await connectToPort(reconnectCtx.port);
-    } else {
+    } else if (reconnectCtx.type === "hid") {
       await connectHid(reconnectCtx.hidPath, reconnectCtx.deviceName, reconnectCtx.vid, reconnectCtx.pid);
+    } else if (reconnectCtx.type === "ble_nus") {
+      await connectBleNus(reconnectCtx.bleId, reconnectCtx.deviceName);
     }
   }, 2000);
 }

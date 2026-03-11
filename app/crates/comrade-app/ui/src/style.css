@@ -167,6 +167,12 @@ body {
   border: 1px solid var(--border);
 }
 
+.badge-ble {
+  background: #0A1A2A;
+  color: #5B9BD5;
+  border: 1px solid #2A4A6A;
+}
+
 /* Port action buttons for "Both" devices */
 
 .port-actions {

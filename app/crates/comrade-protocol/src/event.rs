@@ -59,12 +59,13 @@ pub struct PortInfo {
     pub product: Option<String>,
 }
 
-/// Whether a device is Serial, HID, or both.
+/// Whether a device is Serial, HID, BLE, or a combination.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DeviceKind {
     Serial,
     Hid,
     Both,
+    Ble,
 }
 
 /// HID usage page + usage ID with optional human-readable name.
@@ -98,4 +99,8 @@ pub struct DeviceInfo {
     pub kind: DeviceKind,
     /// HID usage info, if this is a HID device.
     pub hid_usage: Option<HidUsageInfo>,
+    /// BLE peripheral identifier (platform-specific).
+    pub ble_id: Option<String>,
+    /// BLE services advertised (e.g. "nus", "hid").
+    pub ble_services: Option<Vec<String>>,
 }

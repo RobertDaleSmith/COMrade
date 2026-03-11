@@ -1,3 +1,4 @@
+mod ble_session;
 mod commands;
 mod connection_status;
 mod hid_descriptor;
@@ -44,8 +45,10 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::list_devices,
+            commands::scan_ble,
             commands::connect,
             commands::connect_hid,
+            commands::connect_ble_nus,
             commands::send_data,
             commands::send_hid_report,
             commands::get_hid_descriptor,

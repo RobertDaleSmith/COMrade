@@ -194,6 +194,14 @@ export class TerminalUI {
     this.statusState.className = "connected";
   }
 
+  /** Set connection info in the status bar for BLE. */
+  setBleConnected(deviceName: string, profile: string): void {
+    this.statusPort.textContent = deviceName;
+    this.statusConfig.textContent = `BLE ${profile}`;
+    this.statusState.textContent = "CONNECTED";
+    this.statusState.className = "connected";
+  }
+
   /** Set connection info in the status bar for HID. */
   setHidConnected(deviceName: string): void {
     this.statusPort.textContent = deviceName;

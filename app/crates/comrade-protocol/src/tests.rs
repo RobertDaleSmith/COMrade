@@ -101,6 +101,8 @@ fn test_device_info_roundtrip() {
             usage: 0x06,
             usage_name: Some("Keyboard".into()),
         }),
+        ble_id: None,
+        ble_services: None,
     };
     let json = serde_json::to_string(&info).unwrap();
     let parsed: DeviceInfo = serde_json::from_str(&json).unwrap();
@@ -127,6 +129,8 @@ fn test_device_info_minimal() {
         product: None,
         kind: DeviceKind::Hid,
         hid_usage: None,
+        ble_id: None,
+        ble_services: None,
     };
     let json = serde_json::to_string(&info).unwrap();
     let parsed: DeviceInfo = serde_json::from_str(&json).unwrap();

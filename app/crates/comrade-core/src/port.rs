@@ -40,6 +40,8 @@ pub fn enumerate_devices() -> Result<Vec<DeviceInfo>, CoreError> {
                 product: info.product.clone(),
                 kind: DeviceKind::Serial,
                 hid_usage: None,
+                ble_id: None,
+                ble_services: None,
             });
             entry.serial_path = Some(info.path.clone());
             // If it already existed as HID, upgrade to Both.
@@ -66,6 +68,8 @@ pub fn enumerate_devices() -> Result<Vec<DeviceInfo>, CoreError> {
                 product: info.product,
                 kind: DeviceKind::Serial,
                 hid_usage: None,
+                ble_id: None,
+                ble_services: None,
             });
         }
     }
@@ -105,6 +109,8 @@ pub fn enumerate_devices() -> Result<Vec<DeviceInfo>, CoreError> {
                 product: product.clone(),
                 kind: DeviceKind::Hid,
                 hid_usage: None,
+                ble_id: None,
+                ble_services: None,
             });
 
             entry.hid_path = Some(hid_path);
@@ -133,6 +139,7 @@ pub fn enumerate_devices() -> Result<Vec<DeviceInfo>, CoreError> {
             DeviceKind::Both => 0,
             DeviceKind::Serial => 1,
             DeviceKind::Hid => 2,
+            DeviceKind::Ble => 3,
         };
         kind_ord(&a.kind)
             .cmp(&kind_ord(&b.kind))

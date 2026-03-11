@@ -170,19 +170,6 @@ impl ComradeMcp {
         &self,
         Parameters(params): Parameters<SendSerialParams>,
     ) -> Result<CallToolResult, McpError> {
-        let cmd_tx = {
-            let app = self.shared_state.lock().await;
-            match &app.connection {
-                ActiveConnection::Serial { engine, .. } => engine.cmd_sender(),
-                _ => {
-                    return Err(McpError::invalid_request(
-                        "Not connected (serial)".to_string(),
-                        None,
-                    ))
-                }
-            }
-        };
-
         self.log_buffer.push(LogEntry::Serial(SerialLine {
             timestamp: Local::now().format("%H:%M:%S%.3f").to_string(),
             text: params.text.clone(),
@@ -190,12 +177,33 @@ impl ComradeMcp {
             rx_bytes_total: 0,
         }));
 
-        let mut data = params.text.into_bytes();
-        data.push(b'\n');
-        cmd_tx
-            .send(Command::Send { data })
-            .await
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let app = self.shared_state.lock().await;
+        match &app.connection {
+            ActiveConnection::Serial { engine, .. } => {
+                let cmd_tx = engine.cmd_sender();
+                drop(app);
+                let mut data = params.text.into_bytes();
+                data.push(b'\n');
+                cmd_tx
+                    .send(Command::Send { data })
+                    .await
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+            }
+            ActiveConnection::BleNus { session } => {
+                let mut data = params.text.into_bytes();
+                data.push(b'\n');
+                session
+                    .send(data)
+                    .await
+                    .map_err(|e| McpError::internal_error(e, None))?;
+            }
+            _ => {
+                return Err(McpError::invalid_request(
+                    "Not connected (serial/NUS)".to_string(),
+                    None,
+                ))
+            }
+        }
 
         Ok(CallToolResult::success(vec![Content::text("Sent.")]))
     }

@@ -29,6 +29,9 @@ axum = { workspace = true }
 schemars = { workspace = true }
 tokio-util = { workspace = true }
 regex = { workspace = true }
+btleplug = { workspace = true }
+uuid = { workspace = true }
+futures = "0.3"
 
 [features]
 default = ["custom-protocol"]
