@@ -103,6 +103,7 @@ fn test_device_info_roundtrip() {
         }),
         ble_id: None,
         ble_services: None,
+        bus_type: Some("USB".to_string()),
     };
     let json = serde_json::to_string(&info).unwrap();
     let parsed: DeviceInfo = serde_json::from_str(&json).unwrap();
@@ -131,6 +132,7 @@ fn test_device_info_minimal() {
         hid_usage: None,
         ble_id: None,
         ble_services: None,
+        bus_type: None,
     };
     let json = serde_json::to_string(&info).unwrap();
     let parsed: DeviceInfo = serde_json::from_str(&json).unwrap();

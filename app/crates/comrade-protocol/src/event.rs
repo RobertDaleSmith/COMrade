@@ -103,4 +103,6 @@ pub struct DeviceInfo {
     pub ble_id: Option<String>,
     /// BLE services advertised (e.g. "nus", "hid").
     pub ble_services: Option<Vec<String>>,
+    /// Transport bus type (e.g. "USB", "Bluetooth", "I2C", "SPI").
+    pub bus_type: Option<String>,
 }

@@ -20,6 +20,7 @@ interface DeviceInfo {
   } | null;
   ble_id: string | null;
   ble_services: string[] | null;
+  bus_type: string | null;
 }
 
 // DOM elements.
@@ -129,7 +130,9 @@ async function refreshDevices(): Promise<void> {
       name.textContent = dev.product || dev.manufacturer || "Unknown device";
 
       const badge = document.createElement("span");
+      const bus = dev.bus_type; // "USB", "Bluetooth", "I2C", "SPI", or null
       badge.className = `device-badge badge-${dev.kind.toLowerCase()}`;
+      if (bus === "Bluetooth") badge.className += " badge-ble";
       if (dev.kind === "Both") {
         badge.textContent = "SERIAL+HID";
       } else if (dev.kind === "Ble") {
@@ -143,8 +146,12 @@ async function refreshDevices(): Promise<void> {
         } else {
           badge.textContent = "BLE";
         }
-      } else {
-        badge.textContent = dev.kind.toUpperCase();
+      } else if (dev.kind === "Hid" && bus === "Bluetooth") {
+        badge.textContent = "BLE HID";
+      } else if (dev.kind === "Hid") {
+        badge.textContent = bus ? `${bus} HID` : "HID";
+      } else if (dev.kind === "Serial") {
+        badge.textContent = bus ? `${bus} SERIAL` : "SERIAL";
       }
 
       topRow.appendChild(name);
@@ -428,7 +435,23 @@ function scheduleReconnect(): void {
     if (reconnectCtx.type === "serial") {
       await connectToPort(reconnectCtx.port);
     } else if (reconnectCtx.type === "hid") {
-      await connectHid(reconnectCtx.hidPath, reconnectCtx.deviceName, reconnectCtx.vid, reconnectCtx.pid);
+      // Re-enumerate to get fresh HID path (BLE devices get new DevSrvsID on reconnect).
+      const ctx = reconnectCtx;
+      try {
+        const devices = await invoke<DeviceInfo[]>("list_devices");
+        const match = devices.find(
+          (d) => d.vid === ctx.vid && d.pid === ctx.pid && d.hid_path
+        );
+        if (match && match.hid_path) {
+          ctx.hidPath = match.hid_path;
+          await connectHid(match.hid_path, ctx.deviceName, ctx.vid, ctx.pid);
+        } else {
+          // Device not found yet, try again.
+          scheduleReconnect();
+        }
+      } catch {
+        scheduleReconnect();
+      }
     } else if (reconnectCtx.type === "ble_nus") {
       await connectBleNus(reconnectCtx.bleId, reconnectCtx.deviceName);
     }

@@ -108,6 +108,7 @@ pub async fn list_ble_devices() -> Result<Vec<DeviceInfo>, String> {
             hid_usage: None,
             ble_id: Some(ble_id),
             ble_services: Some(vec!["nus".to_string()]),
+            bus_type: Some("Bluetooth".to_string()),
         });
     }
 

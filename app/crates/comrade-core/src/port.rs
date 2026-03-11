@@ -42,6 +42,7 @@ pub fn enumerate_devices() -> Result<Vec<DeviceInfo>, CoreError> {
                 hid_usage: None,
                 ble_id: None,
                 ble_services: None,
+                bus_type: Some("USB".to_string()),
             });
             entry.serial_path = Some(info.path.clone());
             // If it already existed as HID, upgrade to Both.
@@ -70,6 +71,7 @@ pub fn enumerate_devices() -> Result<Vec<DeviceInfo>, CoreError> {
                 hid_usage: None,
                 ble_id: None,
                 ble_services: None,
+                bus_type: None,
             });
         }
     }
@@ -93,6 +95,14 @@ pub fn enumerate_devices() -> Result<Vec<DeviceInfo>, CoreError> {
                 usage_name: None,
             };
 
+            let bus = match dev.bus_type() {
+                hidapi::BusType::Usb => Some("USB".to_string()),
+                hidapi::BusType::Bluetooth => Some("Bluetooth".to_string()),
+                hidapi::BusType::I2c => Some("I2C".to_string()),
+                hidapi::BusType::Spi => Some("SPI".to_string()),
+                _ => None,
+            };
+
             let key = (vid, pid, serial.clone());
             let entry = by_key.entry(key).or_insert_with(|| DeviceInfo {
                 path: hid_path.clone(),
@@ -111,6 +121,7 @@ pub fn enumerate_devices() -> Result<Vec<DeviceInfo>, CoreError> {
                 hid_usage: None,
                 ble_id: None,
                 ble_services: None,
+                bus_type: bus.clone(),
             });
 
             entry.hid_path = Some(hid_path);
@@ -119,6 +130,10 @@ pub fn enumerate_devices() -> Result<Vec<DeviceInfo>, CoreError> {
             // If it already existed as Serial, upgrade to Both.
             if entry.kind == DeviceKind::Serial {
                 entry.kind = DeviceKind::Both;
+            }
+            // Fill in bus type from HID info if not already set.
+            if entry.bus_type.is_none() {
+                entry.bus_type = bus;
             }
             // Fill in missing descriptive fields from HID info.
             if entry.manufacturer.is_none() {
