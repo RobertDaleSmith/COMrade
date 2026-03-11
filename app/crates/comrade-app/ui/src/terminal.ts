@@ -30,6 +30,12 @@ export class TerminalUI {
   private hidReportCount = 0;
   private contextMenu: HTMLElement;
   private contextTarget: HTMLElement | null = null;
+  private activityLed: HTMLElement;
+  private activityTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // Timestamp formatting.
+  private tsFormat: "time" | "elapsed" | "iso" = "time";
+  private connectTime: number = Date.now();
 
   // Search state.
   private searchQuery = "";
@@ -43,6 +49,7 @@ export class TerminalUI {
     this.statusConfig = document.getElementById("status-config")!;
     this.statusState = document.getElementById("status-state")!;
     this.statusRx = document.getElementById("status-rx")!;
+    this.activityLed = document.getElementById("activity-led")!;
 
     // Track scroll position for auto-scroll.
     this.output.addEventListener("scroll", () => {
@@ -121,7 +128,7 @@ export class TerminalUI {
 
     const ts = document.createElement("span");
     ts.className = "ts";
-    ts.textContent = line.timestamp;
+    ts.textContent = this.formatTimestamp(line.timestamp);
 
     const text = document.createElement("span");
     text.className = "text";
@@ -135,8 +142,10 @@ export class TerminalUI {
       this.applySearchToLine(div);
     }
 
-    // Update RX counter.
+    // Update RX counter and activity LED.
     this.statusRx.textContent = `RX: ${this.formatBytes(line.rx_bytes_total)}`;
+    if (line.kind === "received") this.pulseActivity("rx");
+    else if (line.kind === "sent") this.pulseActivity("tx");
 
     this.trimAndScroll();
   }
@@ -149,7 +158,7 @@ export class TerminalUI {
 
     const ts = document.createElement("span");
     ts.className = "ts";
-    ts.textContent = report.timestamp;
+    ts.textContent = this.formatTimestamp(report.timestamp);
 
     const text = document.createElement("span");
     text.className = "text";
@@ -172,8 +181,9 @@ export class TerminalUI {
       this.applySearchToLine(div);
     }
 
-    // Update RX counter with report count.
+    // Update RX counter with report count and activity LED.
     this.statusRx.textContent = `RX: ${this.formatBytes(report.rx_bytes_total)} (${report.report_count} reports)`;
+    this.pulseActivity("rx");
 
     this.trimAndScroll();
   }
@@ -192,6 +202,7 @@ export class TerminalUI {
     this.statusConfig.textContent = `${baud} 8N1`;
     this.statusState.textContent = "CONNECTED";
     this.statusState.className = "connected";
+    this.resetConnectTime();
   }
 
   /** Set connection info in the status bar for BLE. */
@@ -428,6 +439,43 @@ export class TerminalUI {
     if (this.autoScroll) {
       this.output.scrollTop = this.output.scrollHeight;
     }
+  }
+
+  /** Format a timestamp string for display based on current format. */
+  private formatTimestamp(ts: string): string {
+    if (this.tsFormat === "time") return ts;
+    if (this.tsFormat === "elapsed") {
+      // Parse HH:MM:SS.mmm and compute elapsed from connect time.
+      const elapsed = ((Date.now() - this.connectTime) / 1000).toFixed(3);
+      return `+${elapsed}s`;
+    }
+    // ISO: prepend today's date.
+    const today = new Date().toISOString().slice(0, 10);
+    return `${today}T${ts}`;
+  }
+
+  /** Cycle through timestamp formats: time → elapsed → ISO → time. */
+  cycleTimestampFormat(): string {
+    if (this.tsFormat === "time") this.tsFormat = "elapsed";
+    else if (this.tsFormat === "elapsed") this.tsFormat = "iso";
+    else this.tsFormat = "time";
+    return this.tsFormat;
+  }
+
+  /** Reset the connect time for elapsed timestamps. */
+  resetConnectTime(): void {
+    this.connectTime = Date.now();
+  }
+
+  /** Pulse the activity LED for RX or TX. */
+  pulseActivity(direction: "rx" | "tx"): void {
+    this.activityLed.classList.remove("rx", "tx");
+    this.activityLed.classList.add(direction);
+    if (this.activityTimer) clearTimeout(this.activityTimer);
+    this.activityTimer = setTimeout(() => {
+      this.activityLed.classList.remove("rx", "tx");
+      this.activityTimer = null;
+    }, 150);
   }
 
   private formatBytes(n: number): string {

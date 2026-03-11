@@ -1,4 +1,5 @@
 import { invoke, Channel } from "@tauri-apps/api/core";
+import { save, open } from "@tauri-apps/plugin-dialog";
 import { TerminalUI, type SerialLine, type HidReport } from "./terminal";
 import { DescriptorPanel, type HidDescriptorInfo } from "./descriptor-panel";
 
@@ -44,6 +45,30 @@ const searchNextBtn = document.getElementById("search-next")!;
 const hidInputControls = document.getElementById("hid-input-controls")!;
 const hidReportType = document.getElementById("hid-report-type") as HTMLSelectElement;
 const hidReportId = document.getElementById("hid-report-id") as HTMLInputElement;
+
+const baudCustom = document.getElementById("baud-custom") as HTMLInputElement;
+const serialControls = document.getElementById("serial-controls")!;
+const dtrBtn = document.getElementById("dtr-btn")!;
+const rtsBtn = document.getElementById("rts-btn")!;
+const breakBtn = document.getElementById("break-btn")!;
+
+// Custom baud rate handling.
+baudSelect.addEventListener("change", () => {
+  if (baudSelect.value === "custom") {
+    baudCustom.classList.remove("hidden");
+    baudCustom.focus();
+  } else {
+    baudCustom.classList.add("hidden");
+  }
+});
+
+function getSelectedBaud(): number {
+  if (baudSelect.value === "custom") {
+    const v = parseInt(baudCustom.value, 10);
+    return v > 0 ? v : 115200;
+  }
+  return parseInt(baudSelect.value, 10);
+}
 
 // State.
 let terminal: TerminalUI | null = null;
@@ -223,7 +248,7 @@ async function refreshDevices(): Promise<void> {
 // ---- Serial connection ----
 
 async function connectToPort(port: string): Promise<void> {
-  const baud = parseInt(baudSelect.value, 10);
+  const baud = getSelectedBaud();
   stopDeviceListPolling();
   stopReconnect();
   userDisconnected = false;
@@ -235,6 +260,7 @@ async function connectToPort(port: string): Promise<void> {
   isHidMode = false;
   hidInputControls.classList.add("hidden");
   descriptorBtn.classList.add("hidden");
+  serialControls.classList.remove("hidden");
   inputEl.placeholder = "Type command, Enter to send";
 
   // Only create a new terminal if this isn't a reconnect attempt.
@@ -302,6 +328,7 @@ async function connectHid(hidPath: string, deviceName: string, vid: number, pid:
   isHidMode = true;
   hidInputControls.classList.remove("hidden");
   descriptorBtn.classList.remove("hidden");
+  serialControls.classList.add("hidden");
   inputEl.placeholder = "Enter hex bytes: 0A 1B 2C";
 
   if (!terminal) {
@@ -372,6 +399,7 @@ async function connectBleNus(bleId: string, deviceName: string): Promise<void> {
   isHidMode = false;
   hidInputControls.classList.add("hidden");
   descriptorBtn.classList.add("hidden");
+  serialControls.classList.add("hidden");
   inputEl.placeholder = "Type command, Enter to send";
 
   if (!terminal) {
@@ -485,6 +513,11 @@ function showPortSelect(): void {
   connected = false;
   wasConnected = false;
   isHidMode = false;
+  serialControls.classList.add("hidden");
+  dtrState = true;
+  rtsState = false;
+  dtrBtn.classList.add("active");
+  rtsBtn.classList.remove("active");
   terminal = null;
   descriptorPanel = null;
   lineChannel = null;
@@ -694,6 +727,10 @@ document.addEventListener("keydown", (e: KeyboardEvent) => {
     e.preventDefault();
     copyLog();
   }
+  if ((e.metaKey || e.ctrlKey) && e.key === "s") {
+    e.preventDefault();
+    if (terminal) exportLog();
+  }
   if ((e.metaKey || e.ctrlKey) && e.key === "f") {
     e.preventDefault();
     if (terminal) openSearch();
@@ -711,6 +748,103 @@ async function copyLog(): Promise<void> {
   }
 }
 
+// ---- Log export ----
+
+async function exportLog(): Promise<void> {
+  const path = await save({
+    title: "Export Log",
+    defaultPath: `comrade_${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}.log`,
+    filters: [
+      { name: "Log files", extensions: ["log", "txt"] },
+      { name: "CSV", extensions: ["csv"] },
+    ],
+  });
+  if (!path) return;
+
+  const format = path.endsWith(".csv") ? "csv" : "text";
+  try {
+    const count = await invoke<number>("export_log", { path, format });
+    terminal?.appendLine({
+      timestamp: makeTimestamp(),
+      text: `Exported ${count} entries to ${path}`,
+      kind: "system",
+      rx_bytes_total: 0,
+    });
+  } catch (e) {
+    terminal?.appendLine({
+      timestamp: makeTimestamp(),
+      text: `Export failed: ${e}`,
+      kind: "system",
+      rx_bytes_total: 0,
+    });
+  }
+}
+
+// ---- Auto-logging ----
+
+let autoLogActive = false;
+const autologBtn = document.getElementById("autolog-btn")!;
+
+async function toggleAutoLog(): Promise<void> {
+  if (autoLogActive) {
+    // Stop auto-logging.
+    try {
+      const result = await invoke<[string, number] | null>("stop_auto_log");
+      autoLogActive = false;
+      autologBtn.classList.remove("active");
+      autologBtn.textContent = "Log";
+      if (result) {
+        terminal?.appendLine({
+          timestamp: makeTimestamp(),
+          text: `Auto-log stopped: ${result[1]} entries saved to ${result[0]}`,
+          kind: "system",
+          rx_bytes_total: 0,
+        });
+      }
+    } catch (e) {
+      console.error("Stop auto-log:", e);
+    }
+  } else {
+    // Pick a directory and start.
+    const dir = await open({
+      title: "Choose log directory",
+      directory: true,
+    });
+    if (!dir) return;
+
+    try {
+      const path = await invoke<string>("start_auto_log", { directory: dir });
+      autoLogActive = true;
+      autologBtn.classList.add("active");
+      autologBtn.textContent = "Log ●";
+      terminal?.appendLine({
+        timestamp: makeTimestamp(),
+        text: `Auto-logging to ${path}`,
+        kind: "system",
+        rx_bytes_total: 0,
+      });
+    } catch (e) {
+      terminal?.appendLine({
+        timestamp: makeTimestamp(),
+        text: `Auto-log failed: ${e}`,
+        kind: "system",
+        rx_bytes_total: 0,
+      });
+    }
+  }
+}
+
+autologBtn.addEventListener("click", toggleAutoLog);
+
+// Check if auto-log is already active (e.g. reconnect scenario).
+invoke<string | null>("auto_log_status").then((path) => {
+  if (path) {
+    autoLogActive = true;
+    autologBtn.classList.add("active");
+    autologBtn.textContent = "Log ●";
+  }
+});
+
 // ---- MCP copy ----
 
 const mcpCopyBtn = document.getElementById("mcp-copy-btn")!;
@@ -724,7 +858,61 @@ mcpCopyBtn.addEventListener("click", async () => {
 
 // ---- Event listeners ----
 
+const exportBtn = document.getElementById("export-btn")!;
+
+// Serial control buttons.
+let dtrState = true; // DTR is on by default (set on connect)
+let rtsState = false;
+
+dtrBtn.addEventListener("click", async () => {
+  dtrState = !dtrState;
+  dtrBtn.classList.toggle("active", dtrState);
+  try {
+    await invoke("set_dtr", { active: dtrState });
+  } catch (e) {
+    console.error("DTR:", e);
+  }
+});
+
+rtsBtn.addEventListener("click", async () => {
+  rtsState = !rtsState;
+  rtsBtn.classList.toggle("active", rtsState);
+  try {
+    await invoke("set_rts", { active: rtsState });
+  } catch (e) {
+    console.error("RTS:", e);
+  }
+});
+
+breakBtn.addEventListener("click", async () => {
+  try {
+    await invoke("send_break");
+    terminal?.appendLine({
+      timestamp: makeTimestamp(),
+      text: "Break signal sent",
+      kind: "system",
+      rx_bytes_total: 0,
+    });
+  } catch (e) {
+    console.error("Break:", e);
+  }
+});
+
+// Timestamp format cycle — click the RX counter to cycle.
+document.getElementById("status-rx")!.addEventListener("click", () => {
+  if (!terminal) return;
+  const fmt = terminal.cycleTimestampFormat();
+  const label: Record<string, string> = { time: "Time", elapsed: "Elapsed", iso: "ISO" };
+  terminal.appendLine({
+    timestamp: makeTimestamp(),
+    text: `Timestamp format: ${label[fmt] ?? fmt}`,
+    kind: "system",
+    rx_bytes_total: 0,
+  });
+});
+
 refreshBtn.addEventListener("click", refreshDevices);
+exportBtn.addEventListener("click", exportLog);
 copyBtn.addEventListener("click", copyLog);
 clearBtn.addEventListener("click", () => terminal?.clear());
 disconnectBtn.addEventListener("click", disconnect);

@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
+use crate::auto_log::AutoLogger;
 use crate::hid_session::HidReport;
 use crate::line_assembler::SerialLine;
 
@@ -59,6 +60,7 @@ impl LogEntry {
 /// with no `.await` while the lock is held.
 pub struct LogBuffer {
     inner: Mutex<VecDeque<LogEntry>>,
+    auto_logger: Mutex<Option<Arc<AutoLogger>>>,
 }
 
 #[allow(dead_code)]
@@ -66,10 +68,20 @@ impl LogBuffer {
     pub fn new() -> Self {
         Self {
             inner: Mutex::new(VecDeque::with_capacity(MAX_ENTRIES)),
+            auto_logger: Mutex::new(None),
         }
     }
 
+    /// Attach an auto-logger that receives every entry pushed.
+    pub fn set_auto_logger(&self, logger: Arc<AutoLogger>) {
+        *self.auto_logger.lock().unwrap() = Some(logger);
+    }
+
     pub fn push(&self, entry: LogEntry) {
+        // Write to auto-log file if active.
+        if let Some(ref logger) = *self.auto_logger.lock().unwrap() {
+            logger.write(&entry);
+        }
         let mut buf = self.inner.lock().unwrap();
         if buf.len() >= MAX_ENTRIES {
             buf.pop_front();

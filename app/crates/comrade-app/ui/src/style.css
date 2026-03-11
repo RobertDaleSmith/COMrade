@@ -427,6 +427,50 @@ body {
   border-color: var(--border);
 }
 
+#toolbar-actions button.active {
+  color: var(--accent-red);
+  border-color: var(--accent-red-dim);
+}
+
+#toolbar-actions .toggle-btn {
+  font-size: 10px;
+  padding: 1px 5px;
+  font-weight: bold;
+}
+
+#toolbar-actions .toggle-btn.active {
+  background: var(--accent-red-dim);
+  color: var(--fg-primary);
+  border-color: var(--accent-red);
+}
+
+#serial-controls.hidden {
+  display: none;
+}
+
+#serial-controls {
+  display: inline-flex;
+  gap: 3px;
+  margin-right: 4px;
+  padding-right: 6px;
+  border-right: 1px solid var(--border);
+}
+
+#baud-custom {
+  background: var(--bg-elevated);
+  color: var(--fg-primary);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 6px 8px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  width: 100px;
+}
+
+#baud-custom.hidden {
+  display: none;
+}
+
 #toolbar-actions button.hidden {
   display: none;
 }
@@ -435,6 +479,14 @@ body {
   color: var(--accent-red) !important;
   border-color: var(--accent-red) !important;
   box-shadow: 0 0 8px rgba(215, 38, 38, 0.3) !important;
+}
+
+#status-rx {
+  cursor: pointer;
+}
+
+#status-rx:hover {
+  color: var(--fg-primary);
 }
 
 #status-state {
@@ -451,6 +503,25 @@ body {
 
 #status-state.disconnected {
   color: var(--fg-secondary);
+}
+
+.activity-led {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--fg-tertiary);
+  transition: background 0.1s;
+}
+
+.activity-led.rx {
+  background: #3fb950;
+  box-shadow: 0 0 4px #3fb950;
+}
+
+.activity-led.tx {
+  background: var(--accent-orange);
+  box-shadow: 0 0 4px var(--accent-orange);
 }
 
 /* ---- Input bar ---- */

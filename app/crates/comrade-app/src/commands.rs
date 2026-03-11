@@ -7,6 +7,7 @@ use tauri::ipc::Channel;
 use tauri::State;
 use tokio::sync::Mutex;
 
+use crate::auto_log::AutoLogger;
 use crate::ble_session::BleNusSession;
 use crate::connection_status::StatusTracker;
 use crate::hid_descriptor::{self, HidDescriptorInfo};
@@ -86,7 +87,7 @@ pub async fn connect(
     let mut app = state.lock().await;
 
     // Shut down existing connection.
-    shutdown_active(&mut app.connection).await;
+    shutdown_connection(&mut app.connection).await;
 
     let assembler = LineAssembler::new();
 
@@ -227,7 +228,7 @@ pub async fn connect_hid(
     let mut app = state.lock().await;
 
     // Shut down existing connection.
-    shutdown_active(&mut app.connection).await;
+    shutdown_connection(&mut app.connection).await;
 
     let log_buf = log_buffer.inner().clone();
     let status = status_tracker.inner().clone();
@@ -256,7 +257,7 @@ pub async fn connect_ble_nus(
     status_tracker: State<'_, Arc<StatusTracker>>,
 ) -> Result<(), String> {
     let mut app = state.lock().await;
-    shutdown_active(&mut app.connection).await;
+    shutdown_connection(&mut app.connection).await;
 
     let log_buf = log_buffer.inner().clone();
     let status = status_tracker.inner().clone();
@@ -341,17 +342,121 @@ pub async fn get_hid_descriptor(
 }
 
 #[tauri::command]
+pub async fn set_dtr(
+    active: bool,
+    state: State<'_, SharedState>,
+) -> Result<(), String> {
+    let app = state.lock().await;
+    if let ActiveConnection::Serial { ref engine, .. } = app.connection {
+        engine
+            .send(Command::SetDtr { active })
+            .await
+            .map_err(|e| e.to_string())
+    } else {
+        Err("Not connected (serial)".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn set_rts(
+    active: bool,
+    state: State<'_, SharedState>,
+) -> Result<(), String> {
+    let app = state.lock().await;
+    if let ActiveConnection::Serial { ref engine, .. } = app.connection {
+        engine
+            .send(Command::SetRts { active })
+            .await
+            .map_err(|e| e.to_string())
+    } else {
+        Err("Not connected (serial)".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn send_break(
+    state: State<'_, SharedState>,
+) -> Result<(), String> {
+    let app = state.lock().await;
+    if let ActiveConnection::Serial { ref engine, .. } = app.connection {
+        engine
+            .send(Command::SendBreak)
+            .await
+            .map_err(|e| e.to_string())
+    } else {
+        Err("Not connected (serial)".to_string())
+    }
+}
+
+#[tauri::command]
 pub async fn disconnect(
     state: State<'_, SharedState>,
     status_tracker: State<'_, Arc<StatusTracker>>,
 ) -> Result<(), String> {
     let mut app = state.lock().await;
-    shutdown_active(&mut app.connection).await;
+    shutdown_connection(&mut app.connection).await;
     status_tracker.set_disconnected();
     Ok(())
 }
 
-async fn shutdown_active(conn: &mut ActiveConnection) {
+#[tauri::command]
+pub async fn export_log(
+    path: String,
+    format: String,
+    log_buffer: State<'_, Arc<LogBuffer>>,
+) -> Result<usize, String> {
+    let entries = log_buffer.tail(MAX_EXPORT_ENTRIES);
+    let content = match format.as_str() {
+        "csv" => {
+            let mut out = String::from("timestamp,direction,text\n");
+            for e in &entries {
+                let ts = e.timestamp();
+                let kind = e.kind();
+                let text = e.text_content().replace('"', "\"\"");
+                out.push_str(&format!("\"{ts}\",\"{kind}\",\"{text}\"\n"));
+            }
+            out
+        }
+        _ => {
+            // Plain text format.
+            let mut out = String::new();
+            for e in &entries {
+                out.push_str(&e.format_line());
+                out.push('\n');
+            }
+            out
+        }
+    };
+    let count = entries.len();
+    std::fs::write(&path, content).map_err(|e| format!("Write failed: {e}"))?;
+    Ok(count)
+}
+
+const MAX_EXPORT_ENTRIES: usize = 10_000;
+
+#[tauri::command]
+pub fn start_auto_log(
+    directory: String,
+    auto_logger: State<'_, Arc<AutoLogger>>,
+) -> Result<String, String> {
+    auto_logger.start(&directory)
+}
+
+#[tauri::command]
+pub fn stop_auto_log(
+    auto_logger: State<'_, Arc<AutoLogger>>,
+) -> Result<Option<(String, usize)>, String> {
+    Ok(auto_logger.stop())
+}
+
+#[tauri::command]
+pub fn auto_log_status(
+    auto_logger: State<'_, Arc<AutoLogger>>,
+) -> Result<Option<String>, String> {
+    Ok(auto_logger.current_path())
+}
+
+pub async fn shutdown_connection(conn: &mut ActiveConnection) {
     match std::mem::replace(conn, ActiveConnection::None) {
         ActiveConnection::Serial { engine, .. } => {
             let _ = engine.send(Command::Shutdown).await;

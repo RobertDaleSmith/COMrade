@@ -259,6 +259,42 @@ async fn handle_command(
                 warn!("send command but no port open");
             }
         }
+        Command::SetDtr { active } => {
+            if let Some(serial) = port.as_mut() {
+                if let Err(e) = serial.write_data_terminal_ready(active) {
+                    warn!("failed to set DTR: {e}");
+                    let _ = event_tx.send(Event::Error {
+                        ts: make_timestamp(epoch),
+                        message: format!("DTR error: {e}"),
+                    });
+                } else {
+                    debug!("DTR set to {active}");
+                }
+            }
+        }
+        Command::SetRts { active } => {
+            if let Some(serial) = port.as_mut() {
+                if let Err(e) = serial.write_request_to_send(active) {
+                    warn!("failed to set RTS: {e}");
+                    let _ = event_tx.send(Event::Error {
+                        ts: make_timestamp(epoch),
+                        message: format!("RTS error: {e}"),
+                    });
+                } else {
+                    debug!("RTS set to {active}");
+                }
+            }
+        }
+        Command::SendBreak => {
+            if let Some(serial) = port.as_mut() {
+                if let Err(e) = serial.set_break() {
+                    warn!("failed to send break: {e}");
+                }
+                // Brief break pulse.
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                let _ = serial.clear_break();
+            }
+        }
         Command::ListPorts => {
             match list_ports_async().await {
                 Ok(ports) => {

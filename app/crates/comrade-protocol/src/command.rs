@@ -16,6 +16,12 @@ pub enum Command {
     Send {
         data: Vec<u8>,
     },
+    /// Set DTR (Data Terminal Ready) line state.
+    SetDtr { active: bool },
+    /// Set RTS (Request To Send) line state.
+    SetRts { active: bool },
+    /// Send a break signal.
+    SendBreak,
     /// Request a list of available serial ports.
     ListPorts,
     /// Shut down the engine.

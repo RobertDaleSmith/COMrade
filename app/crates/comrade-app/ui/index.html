@@ -28,7 +28,9 @@
             <option value="921600">921600</option>
             <option value="1000000">1000000</option>
             <option value="2000000">2000000</option>
+            <option value="custom">Custom...</option>
           </select>
+          <input type="number" id="baud-custom" class="hidden" placeholder="Baud rate" min="1" />
         </label>
         <button id="refresh-btn">Refresh</button>
       </div>
@@ -48,10 +50,18 @@
           <span id="status-config"></span>
           <span id="status-state">CONNECTING</span>
           <span id="status-rx">RX: 0</span>
+          <span id="activity-led" class="activity-led"></span>
         </div>
         <div id="toolbar-actions">
           <button id="descriptor-btn" class="hidden" title="Show HID descriptor">Descriptor</button>
           <button id="search-btn" title="Search (⌘F)">Search</button>
+          <span id="serial-controls" class="hidden">
+            <button id="dtr-btn" class="toggle-btn active" title="Toggle DTR">DTR</button>
+            <button id="rts-btn" class="toggle-btn" title="Toggle RTS">RTS</button>
+            <button id="break-btn" title="Send break signal">BRK</button>
+          </span>
+          <button id="autolog-btn" title="Toggle auto-logging to file">Log</button>
+          <button id="export-btn" title="Export log (⌘S)">Export</button>
           <button id="copy-btn" title="Copy log (⌘⇧C)">Copy</button>
           <button id="clear-btn" title="Clear log (⌘K)">Clear</button>
           <button id="disconnect-btn" title="Disconnect">Disconnect</button>
