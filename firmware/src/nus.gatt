@@ -1,0 +1,17 @@
+// COMrade UART Bridge — BLE NUS GATT Service
+//
+// Nordic UART Service (NUS) for wireless serial bridging.
+
+PRIMARY_SERVICE, GAP_SERVICE
+CHARACTERISTIC, GAP_DEVICE_NAME, READ, "COMrade Bridge"
+
+PRIMARY_SERVICE, GATT_SERVICE
+
+// Nordic UART Service
+PRIMARY_SERVICE, 6E400001-B5A3-F393-E0A9-E50E24DCCA9E
+
+// RX Characteristic — client writes data here, bridge forwards to UART
+CHARACTERISTIC, 6E400002-B5A3-F393-E0A9-E50E24DCCA9E, WRITE | WRITE_WITHOUT_RESPONSE | DYNAMIC,
+
+// TX Characteristic — bridge sends UART data here via notifications
+CHARACTERISTIC, 6E400003-B5A3-F393-E0A9-E50E24DCCA9E, READ | NOTIFY | DYNAMIC,

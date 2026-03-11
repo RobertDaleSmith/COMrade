@@ -7,6 +7,17 @@ into a USB-to-TTL serial adapter for use with COMrade.
 The firmware scans all GPIOs to find which pin has UART data, detects TX/RX
 orientation, and starts bridging. No configuration needed.
 
+## Two Build Variants
+
+| Build | Board | Transport | UF2 |
+|-------|-------|-----------|-----|
+| `make firmware` | Any RP2040 (Pico, KB2040, etc.) | USB CDC only | `build/uart-bridge.uf2` |
+| `make firmware-w` | Pi Pico W | USB CDC + BLE NUS | `build-w/uart-bridge-w.uf2` |
+
+The Pico W build adds **wireless serial** via BLE Nordic UART Service (NUS).
+Connect over USB as usual, or wirelessly from COMrade's BLE device list.
+Both transports bridge to the same UART — they can be used simultaneously.
+
 ## Wiring
 
 Connect **two adjacent GPIO pins** + GND between your Pico and the target:
@@ -25,25 +36,28 @@ Requires the [Pico SDK](https://github.com/raspberrypi/pico-sdk).
 
 ```bash
 export PICO_SDK_PATH=~/pico-sdk
-make        # builds to firmware/build/uart-bridge.uf2
+
+# Standard RP2040 (any board)
+make firmware        # builds firmware/build/uart-bridge.uf2
+
+# Pi Pico W (USB + BLE)
+make firmware-w      # builds firmware/build-w/uart-bridge-w.uf2
 ```
 
 ## Flashing
 
 1. Hold BOOTSEL on the Pico and plug in USB
-2. Drag `build/uart-bridge.uf2` to the RPI-RP2 drive
+2. Drag the `.uf2` file to the RPI-RP2 drive
 3. Board reboots and appears as a USB serial port
-
-One UF2 works on any RP2040 board (Pico, KB2040, etc.).
 
 ## Configuration
 
-Send commands over USB CDC with the `$CB:` prefix. These are intercepted
-by the bridge and never forwarded to UART.
+Send commands over USB CDC (or BLE NUS) with the `$CB:` prefix. These are
+intercepted by the bridge and never forwarded to UART.
 
 | Command | Description |
 |---------|-------------|
-| `$CB:status` | Show current pins, baud, mode, LED |
+| `$CB:status` | Show current pins, baud, mode, LED, BLE status |
 | `$CB:pins <a> <b>` | Set manual pin pair (reboot to apply) |
 | `$CB:auto` | Switch to auto-detect mode |
 | `$CB:baud <rate>` | Set baud rate (300–921600) |
@@ -54,16 +68,28 @@ by the bridge and never forwarded to UART.
 | `$CB:help` | Show command list |
 
 Settings take effect after reboot. Use `$CB:save` to persist across
-power cycles.
+power cycles. Commands work identically over USB CDC and BLE NUS.
 
 ## LED Status
 
-On boards with a default LED (e.g. Pi Pico GPIO 25):
+On boards with a default LED (e.g. Pi Pico GPIO 25, Pico W CYW43 LED):
 
 - **Blinking** — scanning GPIOs for UART activity
 - **Solid** — bridge active, forwarding data
 
 The LED pin can be changed with `$CB:led <pin>`.
+
+## BLE NUS (Pico W only)
+
+The Pico W build advertises as **"COMrade Bridge"** with the Nordic UART
+Service. Any BLE NUS client can connect — COMrade's app discovers it
+automatically in the device list.
+
+Data flow:
+- UART RX → USB CDC **and** BLE NUS TX (both get the data)
+- USB CDC input → UART TX
+- BLE NUS RX → UART TX
+- `$CB:` commands work from either transport
 
 ## How auto-detect works
 
