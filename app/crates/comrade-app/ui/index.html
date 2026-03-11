@@ -9,37 +9,44 @@
   <body>
     <!-- Device selector (shown when not connected) -->
     <div id="port-select">
-      <div class="port-header">
-        <h1>COMrade</h1>
-        <p>Select a device to connect</p>
+      <div class="port-sidebar">
+        <div class="port-header">
+          <h1>COMrade</h1>
+          <p>Select a device to connect</p>
+        </div>
+        <div class="port-controls">
+          <label id="baud-label">
+            Baud
+            <select id="baud-select">
+              <option value="9600">9600</option>
+              <option value="19200">19200</option>
+              <option value="38400">38400</option>
+              <option value="57600">57600</option>
+              <option value="115200" selected>115200</option>
+              <option value="230400">230400</option>
+              <option value="460800">460800</option>
+              <option value="921600">921600</option>
+              <option value="1000000">1000000</option>
+              <option value="2000000">2000000</option>
+              <option value="custom">Custom...</option>
+            </select>
+            <input type="number" id="baud-custom" class="hidden" placeholder="Baud rate" min="1" />
+          </label>
+          <button id="refresh-btn">Refresh</button>
+        </div>
+        <div class="port-sidebar-spacer"></div>
+        <div class="mcp-badge">
+          <span class="mcp-dot"></span>
+          <span class="mcp-label">MCP server running</span>
+          <span class="mcp-icon" title="MCP server info">&#x2139;</span>
+          <div class="mcp-bubble">
+            <div class="mcp-bubble-title">MCP server running on port 9712</div>
+            <code id="mcp-cmd">claude mcp add --transport http comrade http://127.0.0.1:9712/mcp</code>
+            <button id="mcp-copy-btn" title="Copy command">Copy</button>
+          </div>
+        </div>
       </div>
       <div id="port-list"></div>
-      <div class="port-controls">
-        <label id="baud-label">
-          Baud rate
-          <select id="baud-select">
-            <option value="9600">9600</option>
-            <option value="19200">19200</option>
-            <option value="38400">38400</option>
-            <option value="57600">57600</option>
-            <option value="115200" selected>115200</option>
-            <option value="230400">230400</option>
-            <option value="460800">460800</option>
-            <option value="921600">921600</option>
-            <option value="1000000">1000000</option>
-            <option value="2000000">2000000</option>
-            <option value="custom">Custom...</option>
-          </select>
-          <input type="number" id="baud-custom" class="hidden" placeholder="Baud rate" min="1" />
-        </label>
-        <button id="refresh-btn">Refresh</button>
-      </div>
-      <div class="mcp-info">
-        <span class="mcp-dot"></span>
-        MCP server running —
-        <code id="mcp-cmd">claude mcp add --transport http comrade http://127.0.0.1:9712/mcp</code>
-        <button id="mcp-copy-btn" title="Copy command">Copy</button>
-      </div>
     </div>
 
     <!-- Terminal (shown when connected) -->

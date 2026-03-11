@@ -7,6 +7,8 @@ mod hid_session;
 mod line_assembler;
 mod log_buffer;
 mod mcp;
+#[cfg(target_os = "macos")]
+mod native_ble_nus;
 
 use std::sync::Arc;
 
@@ -76,6 +78,7 @@ pub fn run() {
             commands::send_break,
             commands::disconnect,
             commands::export_log,
+            commands::debug_ble,
             commands::start_auto_log,
             commands::stop_auto_log,
             commands::auto_log_status,

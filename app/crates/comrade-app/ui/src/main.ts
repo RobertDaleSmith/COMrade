@@ -128,11 +128,7 @@ function stopDeviceListPolling(): void {
 
 async function refreshDevices(): Promise<void> {
   try {
-    const [usbDevices, bleDevices] = await Promise.all([
-      invoke<DeviceInfo[]>("list_devices"),
-      invoke<DeviceInfo[]>("scan_ble").catch(() => []),
-    ]);
-    const devices: DeviceInfo[] = [...usbDevices, ...bleDevices];
+    const devices = await invoke<DeviceInfo[]>("list_devices");
     // Skip DOM rebuild if nothing changed.
     const json = JSON.stringify(devices);
     if (json === lastDeviceListJson) return;
@@ -154,33 +150,42 @@ async function refreshDevices(): Promise<void> {
       name.className = "port-name";
       name.textContent = dev.product || dev.manufacturer || "Unknown device";
 
-      const badge = document.createElement("span");
+      const badges = document.createElement("div");
+      badges.className = "device-badges";
       const bus = dev.bus_type; // "USB", "Bluetooth", "I2C", "SPI", or null
-      badge.className = `device-badge badge-${dev.kind.toLowerCase()}`;
-      if (bus === "Bluetooth") badge.className += " badge-ble";
+      const svcs = dev.ble_services || [];
+
+      const addBadge = (text: string, cls: string) => {
+        const b = document.createElement("span");
+        b.className = `device-badge ${cls}`;
+        b.textContent = text;
+        badges.appendChild(b);
+      };
+
+      // Transport badge first.
+      if (bus === "Bluetooth" || dev.kind === "Ble") {
+        addBadge("BT", "badge-ble");
+      } else if (bus === "USB") {
+        addBadge("USB", "badge-usb");
+      } else if (bus) {
+        addBadge(bus, "badge-usb");
+      }
+
+      // Interface badges.
       if (dev.kind === "Both") {
-        badge.textContent = "SERIAL+HID";
+        addBadge("SERIAL", "badge-serial");
+        addBadge("HID", "badge-hid");
       } else if (dev.kind === "Ble") {
-        const svcs = dev.ble_services || [];
-        if (svcs.includes("nus") && svcs.includes("hid")) {
-          badge.textContent = "BLE NUS+HID";
-        } else if (svcs.includes("nus")) {
-          badge.textContent = "BLE NUS";
-        } else if (svcs.includes("hid")) {
-          badge.textContent = "BLE HID";
-        } else {
-          badge.textContent = "BLE";
-        }
-      } else if (dev.kind === "Hid" && bus === "Bluetooth") {
-        badge.textContent = "BLE HID";
+        if (svcs.includes("nus")) addBadge("NUS", "badge-serial");
+        if (svcs.includes("hid")) addBadge("HID", "badge-hid");
       } else if (dev.kind === "Hid") {
-        badge.textContent = bus ? `${bus} HID` : "HID";
+        addBadge("HID", "badge-hid");
       } else if (dev.kind === "Serial") {
-        badge.textContent = bus ? `${bus} SERIAL` : "SERIAL";
+        addBadge("SERIAL", "badge-serial");
       }
 
       topRow.appendChild(name);
-      topRow.appendChild(badge);
+      topRow.appendChild(badges);
 
       const path = document.createElement("div");
       path.className = "port-path";
@@ -226,9 +231,36 @@ async function refreshDevices(): Promise<void> {
         btns.appendChild(hidBtn);
         div.appendChild(btns);
       } else if (dev.kind === "Ble") {
-        const devName = dev.product || "BLE Device";
-        const bleId = dev.ble_id!;
-        div.addEventListener("click", () => connectBleNus(bleId, devName));
+        const svcs = dev.ble_services || [];
+        const hasNus = svcs.includes("nus");
+        const hasHid = svcs.includes("hid") && dev.hid_path;
+        if (hasNus && hasHid) {
+          const btns = document.createElement("div");
+          btns.className = "port-actions";
+          const nusBtn = document.createElement("button");
+          nusBtn.className = "port-action-btn";
+          nusBtn.textContent = "Connect NUS";
+          nusBtn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            connectBleNus(dev.ble_id!, dev.product || "BLE Device");
+          });
+          const hidBtn = document.createElement("button");
+          hidBtn.className = "port-action-btn";
+          hidBtn.textContent = "Connect HID";
+          hidBtn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            connectHid(dev.hid_path!, dev.product || dev.manufacturer || "BLE HID Device", dev.vid ?? 0, dev.pid ?? 0);
+          });
+          btns.appendChild(nusBtn);
+          btns.appendChild(hidBtn);
+          div.appendChild(btns);
+        } else if (hasNus) {
+          div.addEventListener("click", () => connectBleNus(dev.ble_id!, dev.product || "BLE Device"));
+        } else if (hasHid) {
+          div.addEventListener("click", () =>
+            connectHid(dev.hid_path!, dev.product || dev.manufacturer || "BLE HID Device", dev.vid ?? 0, dev.pid ?? 0)
+          );
+        }
       } else if (dev.kind === "Serial") {
         div.addEventListener("click", () => connectToPort(dev.serial_path || dev.path));
       } else {
@@ -726,6 +758,27 @@ document.addEventListener("keydown", (e: KeyboardEvent) => {
   if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key === "C") {
     e.preventDefault();
     copyLog();
+  }
+  if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key === "B") {
+    e.preventDefault();
+    invoke<string[]>("debug_ble").then((lines) => {
+      for (const line of lines) {
+        terminal?.appendLine({
+          timestamp: makeTimestamp(),
+          text: line,
+          kind: "system",
+          rx_bytes_total: 0,
+        });
+      }
+      if (lines.length === 0) {
+        terminal?.appendLine({
+          timestamp: makeTimestamp(),
+          text: "No BLE peripherals found by btleplug",
+          kind: "system",
+          rx_bytes_total: 0,
+        });
+      }
+    }).catch((e) => console.error("debug_ble:", e));
   }
   if ((e.metaKey || e.ctrlKey) && e.key === "s") {
     e.preventDefault();

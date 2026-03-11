@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use chrono::Local;
 use comrade_core::{enumerate_devices, Engine};
-use comrade_protocol::{Command, DeviceInfo, Event, SerialConfig};
+use comrade_protocol::{Command, DeviceInfo, DeviceKind, Event, SerialConfig};
 use tauri::ipc::Channel;
 use tauri::State;
 use tokio::sync::Mutex;
@@ -14,6 +14,8 @@ use crate::hid_descriptor::{self, HidDescriptorInfo};
 use crate::hid_session::{HidReport, HidSession};
 use crate::line_assembler::{LineAssembler, SerialLine};
 use crate::log_buffer::{LogBuffer, LogEntry};
+#[cfg(target_os = "macos")]
+use crate::native_ble_nus::NativeBleNusSession;
 
 /// Active connection — Serial, HID, BLE, or nothing.
 pub(crate) enum ActiveConnection {
@@ -27,6 +29,10 @@ pub(crate) enum ActiveConnection {
     },
     BleNus {
         session: BleNusSession,
+    },
+    #[cfg(target_os = "macos")]
+    NativeBleNus {
+        session: NativeBleNusSession,
     },
 }
 
@@ -46,7 +52,7 @@ impl AppState {
 pub type SharedState = Arc<Mutex<AppState>>;
 
 #[tauri::command]
-pub fn list_devices() -> Result<Vec<DeviceInfo>, String> {
+pub async fn list_devices() -> Result<Vec<DeviceInfo>, String> {
     let mut devices = enumerate_devices().map_err(|e| e.to_string())?;
     devices.retain(|d| {
         // Filter out macOS system serial ports.
@@ -67,6 +73,49 @@ pub fn list_devices() -> Result<Vec<DeviceInfo>, String> {
         }
         true
     });
+
+    // Merge BLE NUS devices with BLE HID devices that hidapi already found.
+    // A BLE device with both HID and NUS services appears as separate entries
+    // (HID from hidapi, NUS from btleplug/CoreBluetooth). Merge by product name
+    // when bus_type is Bluetooth.
+    let ble_devices = crate::ble_session::list_ble_devices().await.unwrap_or_default();
+
+    for ble in ble_devices {
+        // Try to find an existing Bluetooth HID entry with the same product name.
+        let merged = ble.product.as_ref().and_then(|ble_name| {
+            devices.iter_mut().find(|d| {
+                d.bus_type.as_deref() == Some("Bluetooth")
+                    && d.product.as_ref() == Some(ble_name)
+            })
+        });
+
+        if let Some(existing) = merged {
+            // Merge BLE NUS info into the existing HID entry.
+            existing.ble_id = ble.ble_id;
+            if let Some(ref mut svcs) = existing.ble_services {
+                if let Some(new_svcs) = &ble.ble_services {
+                    for s in new_svcs {
+                        if !svcs.contains(s) {
+                            svcs.push(s.clone());
+                        }
+                    }
+                }
+            } else {
+                existing.ble_services = ble.ble_services;
+            }
+            // Add "hid" to services if the existing device is HID.
+            if existing.kind == DeviceKind::Hid {
+                let svcs = existing.ble_services.get_or_insert_with(Vec::new);
+                if !svcs.contains(&"hid".to_string()) {
+                    svcs.push("hid".to_string());
+                }
+            }
+            existing.kind = DeviceKind::Ble;
+        } else {
+            devices.push(ble);
+        }
+    }
+
     Ok(devices)
 }
 
@@ -262,16 +311,42 @@ pub async fn connect_ble_nus(
     let log_buf = log_buffer.inner().clone();
     let status = status_tracker.inner().clone();
 
-    let session = BleNusSession::open(ble_id.clone(), move |line| {
+    // Try btleplug first (for advertising devices), fall back to native CoreBluetooth
+    // (for already-paired devices invisible to btleplug).
+    let log_buf2 = log_buf.clone();
+    let status2 = status.clone();
+    let on_line2 = on_line.clone();
+    let ble_id2 = ble_id.clone();
+
+    match BleNusSession::open(ble_id.clone(), move |line| {
         log_buf.push(LogEntry::Serial(line.clone()));
         status.update_rx_bytes(line.rx_bytes_total);
         let _ = on_line.send(line);
     })
-    .await?;
+    .await
+    {
+        Ok(session) => {
+            status_tracker.set_ble_nus(&ble_id);
+            app.connection = ActiveConnection::BleNus { session };
+            Ok(())
+        }
+        #[cfg(target_os = "macos")]
+        Err(_btleplug_err) => {
+            tracing::debug!("btleplug failed: {_btleplug_err}, trying native CoreBluetooth");
+            let session = NativeBleNusSession::open(ble_id2.clone(), move |line| {
+                log_buf2.push(LogEntry::Serial(line.clone()));
+                status2.update_rx_bytes(line.rx_bytes_total);
+                let _ = on_line2.send(line);
+            })
+            .await?;
 
-    status_tracker.set_ble_nus(&ble_id);
-    app.connection = ActiveConnection::BleNus { session };
-    Ok(())
+            status_tracker.set_ble_nus(&ble_id2);
+            app.connection = ActiveConnection::NativeBleNus { session };
+            Ok(())
+        }
+        #[cfg(not(target_os = "macos"))]
+        Err(e) => Err(e),
+    }
 }
 
 #[tauri::command]
@@ -301,6 +376,12 @@ pub async fn send_data(
                 .map_err(|e| e.to_string())
         }
         ActiveConnection::BleNus { session } => {
+            let mut data = text.into_bytes();
+            data.push(b'\n');
+            session.send(data).await
+        }
+        #[cfg(target_os = "macos")]
+        ActiveConnection::NativeBleNus { session } => {
             let mut data = text.into_bytes();
             data.push(b'\n');
             session.send(data).await
@@ -435,6 +516,11 @@ pub async fn export_log(
 const MAX_EXPORT_ENTRIES: usize = 10_000;
 
 #[tauri::command]
+pub async fn debug_ble() -> Result<Vec<String>, String> {
+    crate::ble_session::debug_ble_peripherals().await
+}
+
+#[tauri::command]
 pub fn start_auto_log(
     directory: String,
     auto_logger: State<'_, Arc<AutoLogger>>,
@@ -465,6 +551,10 @@ pub async fn shutdown_connection(conn: &mut ActiveConnection) {
             session.stop().await;
         }
         ActiveConnection::BleNus { session } => {
+            session.stop().await;
+        }
+        #[cfg(target_os = "macos")]
+        ActiveConnection::NativeBleNus { session } => {
             session.stop().await;
         }
         ActiveConnection::None => {}

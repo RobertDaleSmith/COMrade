@@ -38,11 +38,7 @@ body {
 
 #port-select {
   display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
   height: 100%;
-  padding: 40px;
   border-top: 2px solid var(--accent-red);
 }
 
@@ -50,8 +46,22 @@ body {
   display: none;
 }
 
-.port-header {
+.port-sidebar {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
   text-align: center;
+  width: 300px;
+  flex-shrink: 0;
+  padding: 24px;
+  border-right: 1px solid var(--border);
+}
+
+.port-sidebar-spacer {
+  flex: 1;
+}
+
+.port-header {
   margin-bottom: 24px;
 }
 
@@ -75,11 +85,9 @@ body {
 }
 
 #port-list {
-  width: 100%;
-  max-width: 500px;
-  max-height: 400px;
+  flex: 1;
   overflow-y: auto;
-  margin-bottom: 16px;
+  padding: 16px;
 }
 
 .port-item {
@@ -139,6 +147,12 @@ body {
 
 /* Device badges */
 
+.device-badges {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
 .device-badge {
   font-family: var(--font-ui);
   font-size: 10px;
@@ -147,6 +161,12 @@ body {
   border-radius: 3px;
   letter-spacing: 0.5px;
   flex-shrink: 0;
+}
+
+.badge-usb {
+  background: #1A1A2A;
+  color: #9090B0;
+  border: 1px solid #404060;
 }
 
 .badge-serial {
@@ -202,7 +222,9 @@ body {
 .port-controls {
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 12px;
+  width: 100%;
 }
 
 .port-controls label {
@@ -245,14 +267,15 @@ body {
 
 /* ---- MCP info banner ---- */
 
-.mcp-info {
+.mcp-badge {
   margin-top: 16px;
-  font-family: var(--font-ui);
-  font-size: 12px;
-  color: var(--fg-tertiary);
+  position: relative;
   display: flex;
   align-items: center;
-  gap: 8px;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  align-self: flex-start;
 }
 
 .mcp-dot {
@@ -263,30 +286,94 @@ body {
   flex-shrink: 0;
 }
 
-.mcp-info code {
+.mcp-label {
+  font-family: var(--font-ui);
+  font-size: 12px;
+  color: var(--fg-tertiary);
+}
+
+.mcp-icon {
+  font-family: var(--font-ui);
+  font-size: 13px;
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  color: var(--fg-tertiary);
+  border: 1px solid var(--border);
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.mcp-badge:hover .mcp-icon {
+  color: var(--fg-secondary);
+  border-color: var(--fg-tertiary);
+}
+
+.mcp-bubble {
+  display: none;
+  position: absolute;
+  bottom: 0;
+  left: calc(100% + 8px);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  white-space: nowrap;
+  z-index: 100;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+}
+
+/* Invisible bridge so the mouse can travel from icon to bubble */
+.mcp-bubble::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 100%;
+  width: 12px;
+  height: 100%;
+}
+
+.mcp-badge:hover .mcp-bubble {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.mcp-bubble-title {
+  font-family: var(--font-ui);
+  font-size: 12px;
+  color: var(--fg-secondary);
+  font-weight: 500;
+}
+
+.mcp-bubble code {
   font-family: var(--font-mono);
   font-size: 11px;
-  background: var(--bg-elevated);
-  padding: 2px 6px;
+  background: var(--bg-primary);
+  padding: 4px 8px;
   border-radius: 3px;
   color: var(--fg-secondary);
   -webkit-user-select: text;
   user-select: text;
 }
 
-.mcp-info button {
+.mcp-bubble button {
   font-family: var(--font-ui);
   font-size: 11px;
-  background: var(--bg-elevated);
+  background: var(--bg-primary);
   color: var(--fg-secondary);
   border: 1px solid var(--border);
   border-radius: 3px;
-  padding: 2px 8px;
+  padding: 3px 10px;
   cursor: pointer;
+  align-self: flex-end;
   transition: background 0.15s, color 0.15s;
 }
 
-.mcp-info button:hover {
+.mcp-bubble button:hover {
   color: var(--fg-primary);
 }
 

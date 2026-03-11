@@ -44,25 +44,94 @@ async fn get_adapter() -> Result<&'static Adapter, String> {
         .await
 }
 
+// ---- macOS: retrieve connected peripherals via CoreBluetooth ----
+
+/// Use CoreBluetooth directly to find already-paired peripherals with a given service.
+/// Returns (uuid_string, name) pairs.
+/// btleplug doesn't call `retrieveConnectedPeripheralsWithServices`, so paired devices
+/// that stopped advertising are invisible to it. This fills the gap.
+#[cfg(target_os = "macos")]
+fn native_connected_nus_peripherals() -> Vec<(String, String)> {
+    use objc2_core_bluetooth::{CBCentralManager, CBManagerState, CBUUID};
+    use objc2_foundation::{NSArray, NSString};
+
+    // CBCentralManager is !Send, so create and use it on a dedicated thread.
+    // Delegate callbacks go to the main dispatch queue (Tauri's run loop), so
+    // we just poll `state()` with short sleeps to let the main thread process them.
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let central = unsafe { CBCentralManager::new() };
+
+        // Wait for main run loop to process the PoweredOn state callback.
+        for _ in 0..20 {
+            if unsafe { central.state() } == CBManagerState::PoweredOn {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+
+        let state = unsafe { central.state() };
+        if state != CBManagerState::PoweredOn {
+            warn!("CoreBluetooth: state={:?}, cannot query peripherals", state);
+            let _ = tx.send(Vec::new());
+            return;
+        }
+
+        let nus_uuid_str = NSString::from_str(&NUS_SERVICE.to_string());
+        let nus_cbuuid = unsafe { CBUUID::UUIDWithString(&nus_uuid_str) };
+        let services = NSArray::from_id_slice(&[nus_cbuuid]);
+
+        let peripherals =
+            unsafe { central.retrieveConnectedPeripheralsWithServices(&services) };
+
+        info!(
+            "CoreBluetooth: found {} connected NUS peripherals",
+            peripherals.len()
+        );
+
+        let mut results = Vec::new();
+        for peripheral in peripherals {
+            let uuid = unsafe { peripheral.identifier() };
+            let uuid_str = uuid.UUIDString().to_string();
+
+            let name = unsafe { peripheral.name() }
+                .map(|n| n.to_string())
+                .unwrap_or_default();
+
+            info!("CoreBluetooth: peripheral uuid={uuid_str} name={name:?}");
+
+            if !name.is_empty() {
+                results.push((uuid_str, name));
+            }
+        }
+        let _ = tx.send(results);
+    });
+
+    rx.recv().unwrap_or_default()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn native_connected_nus_peripherals() -> Vec<(String, String)> {
+    Vec::new()
+}
+
 // ---- List connected BLE devices ----
 
-/// Return nearby BLE devices advertising the Nordic UART Service (NUS).
+/// Return BLE devices that support the Nordic UART Service (NUS).
 ///
-/// Uses a persistent background scan filtered to the NUS service UUID so we
-/// don't flood the list with every nearby BLE beacon. The scan starts once
-/// and stays running; each call just reads the cached peripheral list.
+/// Combines two discovery methods:
+/// 1. CoreBluetooth `retrieveConnectedPeripheralsWithServices` — finds already-paired
+///    devices that are connected but not advertising (macOS only).
+/// 2. btleplug scan — finds advertising peripherals.
 pub async fn list_ble_devices() -> Result<Vec<DeviceInfo>, String> {
     let adapter = get_adapter().await?;
 
-    // Start a persistent scan (once) filtered to NUS service UUID.
+    // Start a persistent unfiltered scan (once) so we can see advertising peripherals.
     use std::sync::atomic::{AtomicBool, Ordering};
     static SCAN_STARTED: AtomicBool = AtomicBool::new(false);
     if !SCAN_STARTED.swap(true, Ordering::Relaxed) {
-        info!("Starting BLE scan for NUS devices");
-        let filter = ScanFilter {
-            services: vec![NUS_SERVICE],
-        };
-        let _ = adapter.start_scan(filter).await;
+        info!("Starting BLE scan");
+        let _ = adapter.start_scan(ScanFilter::default()).await;
     }
 
     let peripherals = adapter
@@ -71,6 +140,7 @@ pub async fn list_ble_devices() -> Result<Vec<DeviceInfo>, String> {
         .map_err(|e| format!("BLE peripherals: {e}"))?;
 
     let mut devices = Vec::new();
+    let mut seen_ids = std::collections::HashSet::new();
 
     for p in peripherals {
         let props = match p.properties().await {
@@ -83,13 +153,23 @@ pub async fn list_ble_devices() -> Result<Vec<DeviceInfo>, String> {
             _ => continue,
         };
 
-        // Only include devices advertising NUS.
-        if !props.services.contains(&NUS_SERVICE) {
+        let connected = p.is_connected().await.unwrap_or(false);
+
+        // Check if NUS is advertised in properties.
+        let mut has_nus = props.services.contains(&NUS_SERVICE);
+
+        // If connected but NUS not in advertisements, try service discovery.
+        if !has_nus && connected && p.discover_services().await.is_ok() {
+            let chars = p.characteristics();
+            has_nus = chars.iter().any(|c| c.uuid == NUS_TX_CHAR || c.uuid == NUS_RX_CHAR);
+        }
+
+        if !has_nus {
             continue;
         }
 
         let ble_id = p.id().to_string();
-        let connected = p.is_connected().await.unwrap_or(false);
+        seen_ids.insert(ble_id.clone());
 
         devices.push(DeviceInfo {
             path: format!("ble://{ble_id}"),
@@ -112,8 +192,88 @@ pub async fn list_ble_devices() -> Result<Vec<DeviceInfo>, String> {
         });
     }
 
+    // Add native-discovered connected peripherals that btleplug missed.
+    let native = tokio::task::spawn_blocking(native_connected_nus_peripherals)
+        .await
+        .unwrap_or_default();
+
+    for (uuid_str, name) in native {
+        if seen_ids.contains(&uuid_str) {
+            continue;
+        }
+        devices.push(DeviceInfo {
+            path: format!("ble://{uuid_str}"),
+            serial_path: None,
+            hid_path: None,
+            vid: None,
+            pid: None,
+            serial_number: None,
+            manufacturer: Some("Connected".to_string()),
+            product: Some(name),
+            kind: comrade_protocol::DeviceKind::Ble,
+            hid_usage: None,
+            ble_id: Some(uuid_str),
+            ble_services: Some(vec!["nus".to_string()]),
+            bus_type: Some("Bluetooth".to_string()),
+        });
+    }
+
     devices.sort_by(|a, b| a.product.cmp(&b.product));
     Ok(devices)
+}
+
+/// Debug: return all BLE peripherals visible to btleplug with their properties.
+pub async fn debug_ble_peripherals() -> Result<Vec<String>, String> {
+    let adapter = get_adapter().await?;
+    let peripherals = adapter
+        .peripherals()
+        .await
+        .map_err(|e| format!("BLE peripherals: {e}"))?;
+
+    let mut results = Vec::new();
+
+    // Show native-discovered connected NUS peripherals first.
+    let native = tokio::task::spawn_blocking(native_connected_nus_peripherals)
+        .await
+        .unwrap_or_default();
+    for (uuid, name) in &native {
+        results.push(format!("[native CB] {name} | id={uuid} | connected=true (system-paired)"));
+    }
+
+    for p in peripherals {
+        let props = match p.properties().await {
+            Ok(Some(props)) => props,
+            Ok(None) => {
+                results.push(format!("{}: <no properties>", p.id()));
+                continue;
+            }
+            Err(e) => {
+                results.push(format!("{}: <error: {e}>", p.id()));
+                continue;
+            }
+        };
+
+        let name = props.local_name.as_deref().unwrap_or("<unnamed>");
+        let connected = p.is_connected().await.unwrap_or(false);
+        let adv_services: Vec<String> = props.services.iter().map(|u| u.to_string()).collect();
+
+        // Try service discovery if connected.
+        let mut discovered_services = Vec::new();
+        if connected && p.discover_services().await.is_ok() {
+            for s in p.services() {
+                discovered_services.push(s.uuid.to_string());
+            }
+        }
+
+        results.push(format!(
+            "{name} | id={} | connected={connected} | adv_services=[{}] | discovered_services=[{}]",
+            p.id(),
+            adv_services.join(", "),
+            discovered_services.join(", "),
+        ));
+    }
+
+    Ok(results)
 }
 
 // ---- Find peripheral by ID ----
