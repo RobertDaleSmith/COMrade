@@ -38,12 +38,13 @@
         <div class="mcp-badge">
           <span class="mcp-dot"></span>
           <span class="mcp-label">MCP server running</span>
-          <span class="mcp-icon" title="MCP server info">&#x2139;</span>
-          <div class="mcp-bubble">
-            <div class="mcp-bubble-title">MCP server running on port 9712</div>
-            <code id="mcp-cmd">claude mcp add --transport http comrade http://127.0.0.1:9712/mcp</code>
-            <button id="mcp-copy-btn" title="Copy command">Copy</button>
-          </div>
+          <span class="mcp-icon" title="MCP server info">&#x2139;
+            <div class="mcp-bubble">
+              <div class="mcp-bubble-title">MCP server running on port 9712</div>
+              <code id="mcp-cmd">claude mcp add --transport http comrade http://127.0.0.1:9712/mcp</code>
+              <button id="mcp-copy-btn" title="Copy command">Copy</button>
+            </div>
+          </span>
         </div>
       </div>
       <div id="port-list"></div>
@@ -74,6 +75,9 @@
           <button id="disconnect-btn" title="Disconnect">Disconnect</button>
         </div>
       </div>
+      <div id="tab-bar" class="hidden">
+        <button id="new-tab-btn" title="New connection">+</button>
+      </div>
       <div id="search-bar" class="hidden">
         <input type="text" id="search-input" placeholder="Search logs..." autocomplete="off" spellcheck="false" />
         <span id="search-count"></span>
@@ -82,7 +86,6 @@
         <button id="search-close" title="Close (Escape)">&times;</button>
       </div>
       <div id="terminal-body">
-        <div id="output"></div>
         <div id="descriptor-panel" class="hidden">
           <div class="panel-header">
             <span>HID Descriptor</span>

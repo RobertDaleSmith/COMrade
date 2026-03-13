@@ -24,12 +24,49 @@ interface DeviceInfo {
   bus_type: string | null;
 }
 
-// DOM elements.
+// ---- Reconnect context type ----
+
+type ReconnectCtx =
+  | { type: "serial"; port: string; baud: number }
+  | { type: "hid"; hidPath: string; deviceName: string; vid: number; pid: number }
+  | { type: "ble_nus"; bleId: string; deviceName: string };
+
+// ---- Per-tab state ----
+
+interface Tab {
+  id: string;
+  label: string;
+  terminal: TerminalUI;
+  descriptorPanel: DescriptorPanel | null;
+  connected: boolean;
+  wasConnected: boolean;
+  isHidMode: boolean;
+  userDisconnected: boolean;
+  reconnectCtx: ReconnectCtx | null;
+  reconnectTimer: ReturnType<typeof setTimeout> | null;
+  lineChannel: Channel<SerialLine> | null;
+  reportChannel: Channel<HidReport> | null;
+  history: string[];
+  historyIdx: number;
+  savedInput: string;
+  dtrState: boolean;
+  rtsState: boolean;
+  tabBtn: HTMLElement;
+}
+
+const tabs = new Map<string, Tab>();
+let activeTabId: string | null = null;
+
+function activeTab(): Tab | null {
+  return activeTabId ? tabs.get(activeTabId) ?? null : null;
+}
+
+// ---- DOM elements ----
+
 const portSelectEl = document.getElementById("port-select")!;
 const terminalEl = document.getElementById("terminal")!;
 const portListEl = document.getElementById("port-list")!;
 const baudSelect = document.getElementById("baud-select") as HTMLSelectElement;
-const baudLabel = document.getElementById("baud-label")!;
 const refreshBtn = document.getElementById("refresh-btn")!;
 const inputEl = document.getElementById("input") as HTMLInputElement;
 const copyBtn = document.getElementById("copy-btn")!;
@@ -45,12 +82,13 @@ const searchNextBtn = document.getElementById("search-next")!;
 const hidInputControls = document.getElementById("hid-input-controls")!;
 const hidReportType = document.getElementById("hid-report-type") as HTMLSelectElement;
 const hidReportId = document.getElementById("hid-report-id") as HTMLInputElement;
-
 const baudCustom = document.getElementById("baud-custom") as HTMLInputElement;
 const serialControls = document.getElementById("serial-controls")!;
 const dtrBtn = document.getElementById("dtr-btn")!;
 const rtsBtn = document.getElementById("rts-btn")!;
 const breakBtn = document.getElementById("break-btn")!;
+const tabBar = document.getElementById("tab-bar")!;
+const newTabBtn = document.getElementById("new-tab-btn")!;
 
 // Custom baud rate handling.
 baudSelect.addEventListener("change", () => {
@@ -70,45 +108,144 @@ function getSelectedBaud(): number {
   return parseInt(baudSelect.value, 10);
 }
 
-// State.
-let terminal: TerminalUI | null = null;
-let descriptorPanel: DescriptorPanel | null = null;
-let connected = false;
-let wasConnected = false;
-let isHidMode = false;
-let userDisconnected = false;
-const history: string[] = [];
-let historyIdx = -1;
-let savedInput = "";
-
-// Channels.
-let lineChannel: Channel<SerialLine> | null = null;
-let reportChannel: Channel<HidReport> | null = null;
-
 // Timers.
 let deviceListTimer: ReturnType<typeof setInterval> | null = null;
-let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
-
-// Last device list snapshot for diffing (avoid flicker on no-change refresh).
 let lastDeviceListJson = "";
 
-// Reconnect context — remembers what we were connected to.
-let reconnectCtx: {
-  type: "serial";
-  port: string;
-  baud: number;
-} | {
-  type: "hid";
-  hidPath: string;
-  deviceName: string;
-  vid: number;
-  pid: number;
-} | {
-  type: "ble_nus";
-  bleId: string;
-  deviceName: string;
-} | null = null;
+// ---- Tab management ----
+
+function generateTabId(): string {
+  return crypto.randomUUID();
+}
+
+function createTab(label: string): Tab {
+  const id = generateTabId();
+  const terminal = new TerminalUI();
+
+  // Create tab button in the tab bar.
+  const tabBtn = document.createElement("div");
+  tabBtn.className = "tab-btn";
+  tabBtn.dataset.tabId = id;
+
+  const tabLabel = document.createElement("span");
+  tabLabel.className = "tab-label";
+  tabLabel.textContent = label;
+
+  const closeBtn = document.createElement("span");
+  closeBtn.className = "tab-close";
+  closeBtn.textContent = "\u00d7";
+  closeBtn.title = "Close tab";
+  closeBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    closeTab(id);
+  });
+
+  tabBtn.appendChild(tabLabel);
+  tabBtn.appendChild(closeBtn);
+  tabBtn.addEventListener("click", () => switchTab(id));
+
+  // Insert before the "+" button.
+  tabBar.insertBefore(tabBtn, newTabBtn);
+
+  const tab: Tab = {
+    id,
+    label,
+    terminal,
+    descriptorPanel: null,
+    connected: false,
+    wasConnected: false,
+    isHidMode: false,
+    userDisconnected: false,
+    reconnectCtx: null,
+    reconnectTimer: null,
+    lineChannel: null,
+    reportChannel: null,
+    history: [],
+    historyIdx: -1,
+    savedInput: "",
+    dtrState: true,
+    rtsState: false,
+    tabBtn,
+  };
+
+  tabs.set(id, tab);
+  return tab;
+}
+
+function switchTab(tabId: string): void {
+  const tab = tabs.get(tabId);
+  if (!tab) return;
+
+  // Hide current tab's terminal.
+  const current = activeTab();
+  if (current) {
+    current.terminal.hide();
+    current.tabBtn.classList.remove("active");
+  }
+
+  activeTabId = tabId;
+  tab.terminal.show();
+  tab.tabBtn.classList.add("active");
+
+  // Update toolbar to reflect this tab's state.
+  updateToolbar(tab);
+  inputEl.focus();
+}
+
+function updateToolbar(tab: Tab): void {
+  if (tab.isHidMode) {
+    hidInputControls.classList.remove("hidden");
+    descriptorBtn.classList.remove("hidden");
+    serialControls.classList.add("hidden");
+    inputEl.placeholder = "Enter hex bytes: 0A 1B 2C";
+  } else {
+    hidInputControls.classList.add("hidden");
+    descriptorBtn.classList.add("hidden");
+    // Only show serial controls for serial connections.
+    if (tab.reconnectCtx?.type === "serial") {
+      serialControls.classList.remove("hidden");
+    } else {
+      serialControls.classList.add("hidden");
+    }
+    inputEl.placeholder = "Type command, Enter to send";
+  }
+
+  dtrBtn.classList.toggle("active", tab.dtrState);
+  rtsBtn.classList.toggle("active", tab.rtsState);
+}
+
+function closeTab(tabId: string): void {
+  const tab = tabs.get(tabId);
+  if (!tab) return;
+
+  // Stop reconnect.
+  if (tab.reconnectTimer !== null) {
+    clearTimeout(tab.reconnectTimer);
+  }
+
+  // Disconnect in backend.
+  invoke("disconnect", { tabId }).catch(() => {});
+
+  // Remove DOM elements.
+  tab.terminal.destroy();
+  tab.tabBtn.remove();
+  tabs.delete(tabId);
+
+  if (activeTabId === tabId) {
+    activeTabId = null;
+    // Switch to another tab or show device selector.
+    const remaining = Array.from(tabs.keys());
+    if (remaining.length > 0) {
+      switchTab(remaining[remaining.length - 1]);
+    } else {
+      showPortSelect();
+    }
+  }
+
+  // Hide tab bar if only one tab remains.
+  tabBar.classList.remove("hidden");
+}
 
 // ---- Device list auto-refresh ----
 
@@ -129,7 +266,6 @@ function stopDeviceListPolling(): void {
 async function refreshDevices(): Promise<void> {
   try {
     const devices = await invoke<DeviceInfo[]>("list_devices");
-    // Skip DOM rebuild if nothing changed.
     const json = JSON.stringify(devices);
     if (json === lastDeviceListJson) return;
     lastDeviceListJson = json;
@@ -152,7 +288,7 @@ async function refreshDevices(): Promise<void> {
 
       const badges = document.createElement("div");
       badges.className = "device-badges";
-      const bus = dev.bus_type; // "USB", "Bluetooth", "I2C", "SPI", or null
+      const bus = dev.bus_type;
       const svcs = dev.ble_services || [];
 
       const addBadge = (text: string, cls: string) => {
@@ -277,69 +413,65 @@ async function refreshDevices(): Promise<void> {
   }
 }
 
+// ---- Switch to terminal view ----
+
+function showTerminalView(tab: Tab): void {
+  stopDeviceListPolling();
+  lastDeviceListJson = "";
+
+  portSelectEl.classList.add("hidden");
+  terminalEl.classList.remove("hidden");
+
+  // Show tab bar when more than one tab.
+  tabBar.classList.remove("hidden");
+
+  switchTab(tab.id);
+}
+
 // ---- Serial connection ----
 
 async function connectToPort(port: string): Promise<void> {
   const baud = getSelectedBaud();
-  stopDeviceListPolling();
-  stopReconnect();
-  userDisconnected = false;
-  lastDeviceListJson = "";
+  const label = port.split("/").pop() || port;
+  const tab = createTab(label);
 
-  // Switch to terminal view.
-  portSelectEl.classList.add("hidden");
-  terminalEl.classList.remove("hidden");
-  isHidMode = false;
-  hidInputControls.classList.add("hidden");
-  descriptorBtn.classList.add("hidden");
-  serialControls.classList.remove("hidden");
-  inputEl.placeholder = "Type command, Enter to send";
+  tab.isHidMode = false;
+  showTerminalView(tab);
+  tab.terminal.setConnecting(port);
 
-  // Only create a new terminal if this isn't a reconnect attempt.
-  if (!terminal) {
-    terminal = new TerminalUI();
-  }
-  terminal.setConnecting(port);
-  connected = false;
+  tab.reconnectCtx = { type: "serial", port, baud };
 
-  // Remember for reconnect.
-  reconnectCtx = { type: "serial", port, baud };
+  tab.lineChannel = new Channel<SerialLine>();
+  tab.lineChannel.onmessage = (line: SerialLine) => {
+    tab.terminal.appendLine(line);
 
-  // Create channel for streaming lines.
-  lineChannel = new Channel<SerialLine>();
-  lineChannel.onmessage = (line: SerialLine) => {
-    if (!terminal) return;
-
-    terminal.appendLine(line);
-
-    // Detect connection state from system messages.
     if (line.kind === "system") {
       if (line.text.startsWith("Connected to")) {
-        connected = true;
-        wasConnected = true;
-        terminal.setConnected(port, baud);
+        tab.connected = true;
+        tab.wasConnected = true;
+        tab.terminal.setConnected(port, baud);
       } else if (line.text.startsWith("Disconnected:")) {
-        connected = false;
-        scheduleReconnect();
+        tab.connected = false;
+        scheduleReconnect(tab);
       } else if (line.text.startsWith("Error:")) {
-        if (!connected && wasConnected) {
-          scheduleReconnect();
+        if (!tab.connected && tab.wasConnected) {
+          scheduleReconnect(tab);
         }
       }
     }
   };
 
   try {
-    await invoke("connect", { port, baud, onLine: lineChannel });
+    await invoke("connect", { tabId: tab.id, port, baud, onLine: tab.lineChannel });
   } catch (e) {
-    terminal.appendLine({
+    tab.terminal.appendLine({
       timestamp: makeTimestamp(),
       text: `Failed to connect: ${e}`,
       kind: "system",
       rx_bytes_total: 0,
     });
-    if (wasConnected) {
-      scheduleReconnect();
+    if (tab.wasConnected) {
+      scheduleReconnect(tab);
     }
   }
 
@@ -349,69 +481,49 @@ async function connectToPort(port: string): Promise<void> {
 // ---- HID connection ----
 
 async function connectHid(hidPath: string, deviceName: string, vid: number, pid: number): Promise<void> {
-  stopDeviceListPolling();
-  stopReconnect();
-  userDisconnected = false;
-  lastDeviceListJson = "";
+  const tab = createTab(deviceName);
 
-  // Switch to terminal view.
-  portSelectEl.classList.add("hidden");
-  terminalEl.classList.remove("hidden");
-  isHidMode = true;
-  hidInputControls.classList.remove("hidden");
-  descriptorBtn.classList.remove("hidden");
-  serialControls.classList.add("hidden");
-  inputEl.placeholder = "Enter hex bytes: 0A 1B 2C";
+  tab.isHidMode = true;
+  showTerminalView(tab);
+  tab.terminal.setConnecting(deviceName);
 
-  if (!terminal) {
-    terminal = new TerminalUI();
-  }
-  terminal.setConnecting(deviceName);
-  connected = false;
-  if (!descriptorPanel) {
-    descriptorPanel = new DescriptorPanel();
-  }
+  tab.descriptorPanel = new DescriptorPanel();
+  tab.reconnectCtx = { type: "hid", hidPath, deviceName, vid, pid };
 
-  // Remember for reconnect.
-  reconnectCtx = { type: "hid", hidPath, deviceName, vid, pid };
-
-  // Create channel for streaming reports.
-  reportChannel = new Channel<HidReport>();
-  reportChannel.onmessage = (report: HidReport) => {
-    if (!terminal) return;
-
+  tab.reportChannel = new Channel<HidReport>();
+  tab.reportChannel.onmessage = (report: HidReport) => {
     if (report.kind === "error") {
-      connected = false;
-      terminal.appendHidReport(report);
-      if (wasConnected) {
-        scheduleReconnect();
+      tab.connected = false;
+      tab.terminal.appendHidReport(report);
+      if (tab.wasConnected) {
+        scheduleReconnect(tab);
       }
       return;
     }
 
-    if (!connected) {
-      connected = true;
-      wasConnected = true;
-      terminal.setHidConnected(deviceName);
+    if (!tab.connected) {
+      tab.connected = true;
+      tab.wasConnected = true;
+      tab.terminal.setHidConnected(deviceName);
     }
 
-    terminal.appendHidReport(report);
+    tab.terminal.appendHidReport(report);
   };
 
   try {
-    await invoke("connect_hid", { hidPath, vid, pid, onReport: reportChannel });
-    connected = true;
-    wasConnected = true;
-    terminal.setHidConnected(deviceName);
+    await invoke("connect_hid", { tabId: tab.id, hidPath, vid, pid, onReport: tab.reportChannel });
+    tab.connected = true;
+    tab.wasConnected = true;
+    tab.terminal.setHidConnected(deviceName);
   } catch (e) {
-    terminal.appendLine({
+    tab.terminal.appendLine({
       timestamp: makeTimestamp(),
       text: `Failed to connect: ${e}`,
       kind: "system",
       rx_bytes_total: 0,
     });
-    if (wasConnected) {
-      scheduleReconnect();
+    if (tab.wasConnected) {
+      scheduleReconnect(tab);
     }
   }
 
@@ -421,59 +533,44 @@ async function connectHid(hidPath: string, deviceName: string, vid: number, pid:
 // ---- BLE NUS connection ----
 
 async function connectBleNus(bleId: string, deviceName: string): Promise<void> {
-  stopDeviceListPolling();
-  stopReconnect();
-  userDisconnected = false;
-  lastDeviceListJson = "";
+  const tab = createTab(deviceName);
 
-  portSelectEl.classList.add("hidden");
-  terminalEl.classList.remove("hidden");
-  isHidMode = false;
-  hidInputControls.classList.add("hidden");
-  descriptorBtn.classList.add("hidden");
-  serialControls.classList.add("hidden");
-  inputEl.placeholder = "Type command, Enter to send";
+  tab.isHidMode = false;
+  showTerminalView(tab);
+  tab.terminal.setConnecting(deviceName);
 
-  if (!terminal) {
-    terminal = new TerminalUI();
-  }
-  terminal.setConnecting(deviceName);
-  connected = false;
+  tab.reconnectCtx = { type: "ble_nus", bleId, deviceName };
 
-  reconnectCtx = { type: "ble_nus", bleId, deviceName };
-
-  lineChannel = new Channel<SerialLine>();
-  lineChannel.onmessage = (line: SerialLine) => {
-    if (!terminal) return;
-
-    terminal.appendLine(line);
+  tab.lineChannel = new Channel<SerialLine>();
+  tab.lineChannel.onmessage = (line: SerialLine) => {
+    tab.terminal.appendLine(line);
 
     if (line.kind === "system") {
       if (line.text.includes("disconnected")) {
-        connected = false;
-        scheduleReconnect();
+        tab.connected = false;
+        scheduleReconnect(tab);
       }
-    } else if (!connected) {
-      connected = true;
-      wasConnected = true;
-      terminal.setBleConnected(deviceName, "NUS");
+    } else if (!tab.connected) {
+      tab.connected = true;
+      tab.wasConnected = true;
+      tab.terminal.setBleConnected(deviceName, "NUS");
     }
   };
 
   try {
-    await invoke("connect_ble_nus", { bleId, onLine: lineChannel });
-    connected = true;
-    wasConnected = true;
-    terminal.setBleConnected(deviceName, "NUS");
+    await invoke("connect_ble_nus", { tabId: tab.id, bleId, onLine: tab.lineChannel });
+    tab.connected = true;
+    tab.wasConnected = true;
+    tab.terminal.setBleConnected(deviceName, "NUS");
   } catch (e) {
-    terminal.appendLine({
+    tab.terminal.appendLine({
       timestamp: makeTimestamp(),
       text: `Failed to connect: ${e}`,
       kind: "system",
       rx_bytes_total: 0,
     });
-    if (wasConnected) {
-      scheduleReconnect();
+    if (tab.wasConnected) {
+      scheduleReconnect(tab);
     }
   }
 
@@ -482,21 +579,20 @@ async function connectBleNus(bleId: string, deviceName: string): Promise<void> {
 
 // ---- Reconnect ----
 
-function scheduleReconnect(): void {
-  if (userDisconnected || !reconnectCtx) return;
-  stopReconnect();
+function scheduleReconnect(tab: Tab): void {
+  if (tab.userDisconnected || !tab.reconnectCtx) return;
+  stopReconnect(tab);
 
-  terminal?.setReconnecting();
+  tab.terminal.setReconnecting();
 
-  reconnectTimer = setTimeout(async () => {
-    reconnectTimer = null;
-    if (userDisconnected || !reconnectCtx) return;
+  tab.reconnectTimer = setTimeout(async () => {
+    tab.reconnectTimer = null;
+    if (tab.userDisconnected || !tab.reconnectCtx) return;
 
-    if (reconnectCtx.type === "serial") {
-      await connectToPort(reconnectCtx.port);
-    } else if (reconnectCtx.type === "hid") {
-      // Re-enumerate to get fresh HID path (BLE devices get new DevSrvsID on reconnect).
-      const ctx = reconnectCtx;
+    if (tab.reconnectCtx.type === "serial") {
+      await reconnectSerial(tab, tab.reconnectCtx.port, tab.reconnectCtx.baud);
+    } else if (tab.reconnectCtx.type === "hid") {
+      const ctx = tab.reconnectCtx;
       try {
         const devices = await invoke<DeviceInfo[]>("list_devices");
         const match = devices.find(
@@ -504,83 +600,157 @@ function scheduleReconnect(): void {
         );
         if (match && match.hid_path) {
           ctx.hidPath = match.hid_path;
-          await connectHid(match.hid_path, ctx.deviceName, ctx.vid, ctx.pid);
+          await reconnectHid(tab, match.hid_path, ctx.deviceName, ctx.vid, ctx.pid);
         } else {
-          // Device not found yet, try again.
-          scheduleReconnect();
+          scheduleReconnect(tab);
         }
       } catch {
-        scheduleReconnect();
+        scheduleReconnect(tab);
       }
-    } else if (reconnectCtx.type === "ble_nus") {
-      await connectBleNus(reconnectCtx.bleId, reconnectCtx.deviceName);
+    } else if (tab.reconnectCtx.type === "ble_nus") {
+      await reconnectBleNus(tab, tab.reconnectCtx.bleId, tab.reconnectCtx.deviceName);
     }
   }, 2000);
 }
 
-function stopReconnect(): void {
-  if (reconnectTimer !== null) {
-    clearTimeout(reconnectTimer);
-    reconnectTimer = null;
+function stopReconnect(tab: Tab): void {
+  if (tab.reconnectTimer !== null) {
+    clearTimeout(tab.reconnectTimer);
+    tab.reconnectTimer = null;
+  }
+}
+
+// Reconnect helpers — reuse existing tab instead of creating new one.
+
+async function reconnectSerial(tab: Tab, port: string, baud: number): Promise<void> {
+  tab.lineChannel = new Channel<SerialLine>();
+  tab.lineChannel.onmessage = (line: SerialLine) => {
+    tab.terminal.appendLine(line);
+    if (line.kind === "system") {
+      if (line.text.startsWith("Connected to")) {
+        tab.connected = true;
+        tab.wasConnected = true;
+        tab.terminal.setConnected(port, baud);
+      } else if (line.text.startsWith("Disconnected:")) {
+        tab.connected = false;
+        scheduleReconnect(tab);
+      } else if (line.text.startsWith("Error:") && !tab.connected && tab.wasConnected) {
+        scheduleReconnect(tab);
+      }
+    }
+  };
+  try {
+    await invoke("connect", { tabId: tab.id, port, baud, onLine: tab.lineChannel });
+  } catch {
+    scheduleReconnect(tab);
+  }
+}
+
+async function reconnectHid(tab: Tab, hidPath: string, deviceName: string, vid: number, pid: number): Promise<void> {
+  tab.reportChannel = new Channel<HidReport>();
+  tab.reportChannel.onmessage = (report: HidReport) => {
+    if (report.kind === "error") {
+      tab.connected = false;
+      tab.terminal.appendHidReport(report);
+      if (tab.wasConnected) scheduleReconnect(tab);
+      return;
+    }
+    if (!tab.connected) {
+      tab.connected = true;
+      tab.wasConnected = true;
+      tab.terminal.setHidConnected(deviceName);
+    }
+    tab.terminal.appendHidReport(report);
+  };
+  try {
+    await invoke("connect_hid", { tabId: tab.id, hidPath, vid, pid, onReport: tab.reportChannel });
+    tab.connected = true;
+    tab.wasConnected = true;
+    tab.terminal.setHidConnected(deviceName);
+  } catch {
+    scheduleReconnect(tab);
+  }
+}
+
+async function reconnectBleNus(tab: Tab, bleId: string, deviceName: string): Promise<void> {
+  tab.lineChannel = new Channel<SerialLine>();
+  tab.lineChannel.onmessage = (line: SerialLine) => {
+    tab.terminal.appendLine(line);
+    if (line.kind === "system" && line.text.includes("disconnected")) {
+      tab.connected = false;
+      scheduleReconnect(tab);
+    } else if (!tab.connected) {
+      tab.connected = true;
+      tab.wasConnected = true;
+      tab.terminal.setBleConnected(deviceName, "NUS");
+    }
+  };
+  try {
+    await invoke("connect_ble_nus", { tabId: tab.id, bleId, onLine: tab.lineChannel });
+    tab.connected = true;
+    tab.wasConnected = true;
+    tab.terminal.setBleConnected(deviceName, "NUS");
+  } catch {
+    scheduleReconnect(tab);
   }
 }
 
 // ---- Disconnect ----
 
 async function disconnect(): Promise<void> {
-  userDisconnected = true;
-  stopReconnect();
-  reconnectCtx = null;
-  try {
-    await invoke("disconnect");
-  } catch (_) {
-    // ignore
-  }
-  showPortSelect();
+  const tab = activeTab();
+  if (!tab) return;
+
+  tab.userDisconnected = true;
+  stopReconnect(tab);
+  closeTab(tab.id);
 }
 
 function showPortSelect(): void {
   terminalEl.classList.add("hidden");
+  tabBar.classList.add("hidden");
   portSelectEl.classList.remove("hidden");
-  connected = false;
-  wasConnected = false;
-  isHidMode = false;
   serialControls.classList.add("hidden");
-  dtrState = true;
-  rtsState = false;
-  dtrBtn.classList.add("active");
-  rtsBtn.classList.remove("active");
-  terminal = null;
-  descriptorPanel = null;
-  lineChannel = null;
-  reportChannel = null;
+  activeTabId = null;
   refreshDevices();
   startDeviceListPolling();
 }
 
+// ---- New tab button ----
+
+newTabBtn.addEventListener("click", () => {
+  // Show device selector to pick a new device.
+  stopDeviceListPolling();
+  portSelectEl.classList.remove("hidden");
+  // Keep terminal visible behind so user can switch back via tabs.
+  refreshDevices();
+  startDeviceListPolling();
+});
+
 // ---- Input handling ----
 
 async function sendInput(): Promise<void> {
+  const tab = activeTab();
+  if (!tab || !tab.connected) return;
   const text = inputEl.value;
-  if (!text || !connected) return;
+  if (!text) return;
 
-  // Push to history.
-  if (history.length === 0 || history[history.length - 1] !== text) {
-    history.push(text);
+  if (tab.history.length === 0 || tab.history[tab.history.length - 1] !== text) {
+    tab.history.push(text);
   }
-  historyIdx = -1;
+  tab.historyIdx = -1;
   inputEl.value = "";
 
-  if (isHidMode) {
-    await sendHidInput(text);
+  if (tab.isHidMode) {
+    await sendHidInput(tab, text);
   } else {
-    await sendSerialInput(text);
+    await sendSerialInput(tab, text);
   }
 }
 
-async function sendSerialInput(text: string): Promise<void> {
+async function sendSerialInput(tab: Tab, text: string): Promise<void> {
   const ts = makeTimestamp();
-  terminal?.appendLine({
+  tab.terminal.appendLine({
     timestamp: ts,
     text,
     kind: "sent",
@@ -588,9 +758,9 @@ async function sendSerialInput(text: string): Promise<void> {
   });
 
   try {
-    await invoke("send_data", { text });
+    await invoke("send_data", { tabId: tab.id, text });
   } catch (e) {
-    terminal?.appendLine({
+    tab.terminal.appendLine({
       timestamp: ts,
       text: `Send error: ${e}`,
       kind: "system",
@@ -599,10 +769,10 @@ async function sendSerialInput(text: string): Promise<void> {
   }
 }
 
-async function sendHidInput(hexStr: string): Promise<void> {
+async function sendHidInput(tab: Tab, hexStr: string): Promise<void> {
   const bytes = parseHexBytes(hexStr);
   if (bytes === null) {
-    terminal?.appendLine({
+    tab.terminal.appendLine({
       timestamp: makeTimestamp(),
       text: "Invalid hex input. Use space-separated hex bytes: 0A 1B 2C",
       kind: "system",
@@ -618,7 +788,7 @@ async function sendHidInput(hexStr: string): Promise<void> {
 
   const ts = makeTimestamp();
   const hex = data.map((b) => b.toString(16).padStart(2, "0").toUpperCase()).join(" ");
-  terminal?.appendLine({
+  tab.terminal.appendLine({
     timestamp: ts,
     text: `> ${reportType} [${reportId.toString(16).padStart(2, "0").toUpperCase()}] ${hex}`,
     kind: "sent",
@@ -626,9 +796,9 @@ async function sendHidInput(hexStr: string): Promise<void> {
   });
 
   try {
-    await invoke("send_hid_report", { data, reportType });
+    await invoke("send_hid_report", { tabId: tab.id, data, reportType });
   } catch (e) {
-    terminal?.appendLine({
+    tab.terminal.appendLine({
       timestamp: ts,
       text: `Send error: ${e}`,
       kind: "system",
@@ -661,10 +831,11 @@ function makeTimestamp(): string {
 // ---- Descriptor panel ----
 
 async function toggleDescriptor(): Promise<void> {
-  if (!descriptorPanel) return;
+  const tab = activeTab();
+  if (!tab?.descriptorPanel) return;
   try {
-    const info: HidDescriptorInfo = await invoke("get_hid_descriptor");
-    descriptorPanel.toggle(info);
+    const info: HidDescriptorInfo = await invoke("get_hid_descriptor", { tabId: tab.id });
+    tab.descriptorPanel.toggle(info);
   } catch (e) {
     console.error("Failed to get descriptor:", e);
   }
@@ -673,9 +844,10 @@ async function toggleDescriptor(): Promise<void> {
 // ---- Search ----
 
 function openSearch(): void {
-  if (!terminal) return;
+  const tab = activeTab();
+  if (!tab) return;
   searchBar.classList.remove("hidden");
-  terminal.startSearch();
+  tab.terminal.startSearch();
   searchInput.focus();
   searchInput.select();
 }
@@ -683,24 +855,24 @@ function openSearch(): void {
 function closeSearch(): void {
   searchBar.classList.add("hidden");
   searchInput.value = "";
-  terminal?.endSearch();
+  activeTab()?.terminal.endSearch();
   inputEl.focus();
 }
 
 searchInput.addEventListener("input", () => {
   if (searchDebounceTimer !== null) clearTimeout(searchDebounceTimer);
   searchDebounceTimer = setTimeout(() => {
-    terminal?.updateSearch(searchInput.value);
+    activeTab()?.terminal.updateSearch(searchInput.value);
   }, 100);
 });
 
 searchInput.addEventListener("keydown", (e: KeyboardEvent) => {
   if (e.key === "Enter" && e.shiftKey) {
     e.preventDefault();
-    terminal?.prevMatch();
+    activeTab()?.terminal.prevMatch();
   } else if (e.key === "Enter") {
     e.preventDefault();
-    terminal?.nextMatch();
+    activeTab()?.terminal.nextMatch();
   } else if (e.key === "Escape") {
     e.preventDefault();
     closeSearch();
@@ -708,8 +880,8 @@ searchInput.addEventListener("keydown", (e: KeyboardEvent) => {
 });
 
 searchCloseBtn.addEventListener("click", closeSearch);
-searchPrevBtn.addEventListener("click", () => terminal?.prevMatch());
-searchNextBtn.addEventListener("click", () => terminal?.nextMatch());
+searchPrevBtn.addEventListener("click", () => activeTab()?.terminal.prevMatch());
+searchNextBtn.addEventListener("click", () => activeTab()?.terminal.nextMatch());
 searchBtn.addEventListener("click", () => {
   if (searchBar.classList.contains("hidden")) {
     openSearch();
@@ -721,39 +893,41 @@ searchBtn.addEventListener("click", () => {
 // ---- Keyboard shortcuts ----
 
 inputEl.addEventListener("keydown", (e: KeyboardEvent) => {
+  const tab = activeTab();
   if (e.key === "Enter") {
     e.preventDefault();
     sendInput();
   } else if (e.key === "ArrowUp") {
     e.preventDefault();
-    if (history.length === 0) return;
-    if (historyIdx === -1) {
-      savedInput = inputEl.value;
-      historyIdx = history.length - 1;
-    } else if (historyIdx > 0) {
-      historyIdx--;
+    if (!tab || tab.history.length === 0) return;
+    if (tab.historyIdx === -1) {
+      tab.savedInput = inputEl.value;
+      tab.historyIdx = tab.history.length - 1;
+    } else if (tab.historyIdx > 0) {
+      tab.historyIdx--;
     }
-    inputEl.value = history[historyIdx];
+    inputEl.value = tab.history[tab.historyIdx];
   } else if (e.key === "ArrowDown") {
     e.preventDefault();
-    if (historyIdx === -1) return;
-    if (historyIdx < history.length - 1) {
-      historyIdx++;
-      inputEl.value = history[historyIdx];
+    if (!tab || tab.historyIdx === -1) return;
+    if (tab.historyIdx < tab.history.length - 1) {
+      tab.historyIdx++;
+      inputEl.value = tab.history[tab.historyIdx];
     } else {
-      historyIdx = -1;
-      inputEl.value = savedInput;
+      tab.historyIdx = -1;
+      inputEl.value = tab.savedInput;
     }
   } else if (e.key === "Escape") {
     e.preventDefault();
-    terminal?.scrollToBottom();
+    tab?.terminal.scrollToBottom();
   }
 });
 
 document.addEventListener("keydown", (e: KeyboardEvent) => {
+  const tab = activeTab();
   if ((e.metaKey || e.ctrlKey) && e.key === "k") {
     e.preventDefault();
-    terminal?.clear();
+    tab?.terminal.clear();
   }
   if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key === "C") {
     e.preventDefault();
@@ -763,7 +937,7 @@ document.addEventListener("keydown", (e: KeyboardEvent) => {
     e.preventDefault();
     invoke<string[]>("debug_ble").then((lines) => {
       for (const line of lines) {
-        terminal?.appendLine({
+        tab?.terminal.appendLine({
           timestamp: makeTimestamp(),
           text: line,
           kind: "system",
@@ -771,7 +945,7 @@ document.addEventListener("keydown", (e: KeyboardEvent) => {
         });
       }
       if (lines.length === 0) {
-        terminal?.appendLine({
+        tab?.terminal.appendLine({
           timestamp: makeTimestamp(),
           text: "No BLE peripherals found by btleplug",
           kind: "system",
@@ -782,19 +956,20 @@ document.addEventListener("keydown", (e: KeyboardEvent) => {
   }
   if ((e.metaKey || e.ctrlKey) && e.key === "s") {
     e.preventDefault();
-    if (terminal) exportLog();
+    if (tab) exportLog();
   }
   if ((e.metaKey || e.ctrlKey) && e.key === "f") {
     e.preventDefault();
-    if (terminal) openSearch();
+    if (tab) openSearch();
   }
 });
 
 // ---- Copy log ----
 
 async function copyLog(): Promise<void> {
-  if (!terminal) return;
-  const ok = await terminal.copyLog();
+  const tab = activeTab();
+  if (!tab) return;
+  const ok = await tab.terminal.copyLog();
   if (ok) {
     copyBtn.textContent = "Copied!";
     setTimeout(() => (copyBtn.textContent = "Copy"), 1500);
@@ -804,6 +979,9 @@ async function copyLog(): Promise<void> {
 // ---- Log export ----
 
 async function exportLog(): Promise<void> {
+  const tab = activeTab();
+  if (!tab) return;
+
   const path = await save({
     title: "Export Log",
     defaultPath: `comrade_${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}.log`,
@@ -816,15 +994,15 @@ async function exportLog(): Promise<void> {
 
   const format = path.endsWith(".csv") ? "csv" : "text";
   try {
-    const count = await invoke<number>("export_log", { path, format });
-    terminal?.appendLine({
+    const count = await invoke<number>("export_log", { tabId: tab.id, path, format });
+    tab.terminal.appendLine({
       timestamp: makeTimestamp(),
       text: `Exported ${count} entries to ${path}`,
       kind: "system",
       rx_bytes_total: 0,
     });
   } catch (e) {
-    terminal?.appendLine({
+    tab.terminal.appendLine({
       timestamp: makeTimestamp(),
       text: `Export failed: ${e}`,
       kind: "system",
@@ -839,15 +1017,15 @@ let autoLogActive = false;
 const autologBtn = document.getElementById("autolog-btn")!;
 
 async function toggleAutoLog(): Promise<void> {
+  const tab = activeTab();
   if (autoLogActive) {
-    // Stop auto-logging.
     try {
       const result = await invoke<[string, number] | null>("stop_auto_log");
       autoLogActive = false;
       autologBtn.classList.remove("active");
       autologBtn.textContent = "Log";
       if (result) {
-        terminal?.appendLine({
+        tab?.terminal.appendLine({
           timestamp: makeTimestamp(),
           text: `Auto-log stopped: ${result[1]} entries saved to ${result[0]}`,
           kind: "system",
@@ -858,7 +1036,6 @@ async function toggleAutoLog(): Promise<void> {
       console.error("Stop auto-log:", e);
     }
   } else {
-    // Pick a directory and start.
     const dir = await open({
       title: "Choose log directory",
       directory: true,
@@ -869,15 +1046,15 @@ async function toggleAutoLog(): Promise<void> {
       const path = await invoke<string>("start_auto_log", { directory: dir });
       autoLogActive = true;
       autologBtn.classList.add("active");
-      autologBtn.textContent = "Log ●";
-      terminal?.appendLine({
+      autologBtn.textContent = "Log \u25cf";
+      tab?.terminal.appendLine({
         timestamp: makeTimestamp(),
         text: `Auto-logging to ${path}`,
         kind: "system",
         rx_bytes_total: 0,
       });
     } catch (e) {
-      terminal?.appendLine({
+      tab?.terminal.appendLine({
         timestamp: makeTimestamp(),
         text: `Auto-log failed: ${e}`,
         kind: "system",
@@ -889,12 +1066,11 @@ async function toggleAutoLog(): Promise<void> {
 
 autologBtn.addEventListener("click", toggleAutoLog);
 
-// Check if auto-log is already active (e.g. reconnect scenario).
 invoke<string | null>("auto_log_status").then((path) => {
   if (path) {
     autoLogActive = true;
     autologBtn.classList.add("active");
-    autologBtn.textContent = "Log ●";
+    autologBtn.textContent = "Log \u25cf";
   }
 });
 
@@ -913,34 +1089,36 @@ mcpCopyBtn.addEventListener("click", async () => {
 
 const exportBtn = document.getElementById("export-btn")!;
 
-// Serial control buttons.
-let dtrState = true; // DTR is on by default (set on connect)
-let rtsState = false;
-
 dtrBtn.addEventListener("click", async () => {
-  dtrState = !dtrState;
-  dtrBtn.classList.toggle("active", dtrState);
+  const tab = activeTab();
+  if (!tab) return;
+  tab.dtrState = !tab.dtrState;
+  dtrBtn.classList.toggle("active", tab.dtrState);
   try {
-    await invoke("set_dtr", { active: dtrState });
+    await invoke("set_dtr", { tabId: tab.id, active: tab.dtrState });
   } catch (e) {
     console.error("DTR:", e);
   }
 });
 
 rtsBtn.addEventListener("click", async () => {
-  rtsState = !rtsState;
-  rtsBtn.classList.toggle("active", rtsState);
+  const tab = activeTab();
+  if (!tab) return;
+  tab.rtsState = !tab.rtsState;
+  rtsBtn.classList.toggle("active", tab.rtsState);
   try {
-    await invoke("set_rts", { active: rtsState });
+    await invoke("set_rts", { tabId: tab.id, active: tab.rtsState });
   } catch (e) {
     console.error("RTS:", e);
   }
 });
 
 breakBtn.addEventListener("click", async () => {
+  const tab = activeTab();
+  if (!tab) return;
   try {
-    await invoke("send_break");
-    terminal?.appendLine({
+    await invoke("send_break", { tabId: tab.id });
+    tab.terminal.appendLine({
       timestamp: makeTimestamp(),
       text: "Break signal sent",
       kind: "system",
@@ -951,12 +1129,13 @@ breakBtn.addEventListener("click", async () => {
   }
 });
 
-// Timestamp format cycle — click the RX counter to cycle.
+// Timestamp format cycle.
 document.getElementById("status-rx")!.addEventListener("click", () => {
-  if (!terminal) return;
-  const fmt = terminal.cycleTimestampFormat();
+  const tab = activeTab();
+  if (!tab) return;
+  const fmt = tab.terminal.cycleTimestampFormat();
   const label: Record<string, string> = { time: "Time", elapsed: "Elapsed", iso: "ISO" };
-  terminal.appendLine({
+  tab.terminal.appendLine({
     timestamp: makeTimestamp(),
     text: `Timestamp format: ${label[fmt] ?? fmt}`,
     kind: "system",
@@ -967,7 +1146,7 @@ document.getElementById("status-rx")!.addEventListener("click", () => {
 refreshBtn.addEventListener("click", refreshDevices);
 exportBtn.addEventListener("click", exportLog);
 copyBtn.addEventListener("click", copyLog);
-clearBtn.addEventListener("click", () => terminal?.clear());
+clearBtn.addEventListener("click", () => activeTab()?.terminal.clear());
 disconnectBtn.addEventListener("click", disconnect);
 descriptorBtn.addEventListener("click", toggleDescriptor);
 

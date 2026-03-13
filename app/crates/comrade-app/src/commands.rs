@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::Local;
@@ -36,16 +37,38 @@ pub(crate) enum ActiveConnection {
     },
 }
 
+/// Per-tab state: connection + log buffer + status tracker.
+pub(crate) struct TabState {
+    pub connection: ActiveConnection,
+    pub log_buffer: Arc<LogBuffer>,
+    pub status_tracker: Arc<StatusTracker>,
+}
+
 /// Shared application state managed by Tauri.
 pub struct AppState {
-    pub(crate) connection: ActiveConnection,
+    pub(crate) tabs: HashMap<String, TabState>,
+    pub(crate) auto_logger: Arc<AutoLogger>,
 }
 
 impl AppState {
-    pub fn new() -> Self {
+    pub fn new(auto_logger: Arc<AutoLogger>) -> Self {
         Self {
-            connection: ActiveConnection::None,
+            tabs: HashMap::new(),
+            auto_logger,
         }
+    }
+
+    /// Get or create tab state for a given tab ID.
+    fn get_or_create_tab(&mut self, tab_id: &str) -> &mut TabState {
+        self.tabs.entry(tab_id.to_string()).or_insert_with(|| {
+            let log_buffer = Arc::new(LogBuffer::new());
+            log_buffer.set_auto_logger(self.auto_logger.clone());
+            TabState {
+                connection: ActiveConnection::None,
+                log_buffer,
+                status_tracker: Arc::new(StatusTracker::new()),
+            }
+        })
     }
 }
 
@@ -55,14 +78,11 @@ pub type SharedState = Arc<Mutex<AppState>>;
 pub async fn list_devices() -> Result<Vec<DeviceInfo>, String> {
     let mut devices = enumerate_devices().map_err(|e| e.to_string())?;
     devices.retain(|d| {
-        // Filter out macOS system serial ports.
         if let Some(ref sp) = d.serial_path {
             if sp == "/dev/cu.debug-console" || sp == "/dev/cu.Bluetooth-Incoming-Port" {
                 return false;
             }
         }
-        // Filter out Apple internal HID devices (keyboard, trackpad, etc.)
-        // and devices with vid/pid 0x0000 (virtual/system HID endpoints).
         if d.kind == comrade_protocol::DeviceKind::Hid {
             if d.vid == Some(0x05AC) {
                 return false;
@@ -74,14 +94,9 @@ pub async fn list_devices() -> Result<Vec<DeviceInfo>, String> {
         true
     });
 
-    // Merge BLE NUS devices with BLE HID devices that hidapi already found.
-    // A BLE device with both HID and NUS services appears as separate entries
-    // (HID from hidapi, NUS from btleplug/CoreBluetooth). Merge by product name
-    // when bus_type is Bluetooth.
     let ble_devices = crate::ble_session::list_ble_devices().await.unwrap_or_default();
 
     for ble in ble_devices {
-        // Try to find an existing Bluetooth HID entry with the same product name.
         let merged = ble.product.as_ref().and_then(|ble_name| {
             devices.iter_mut().find(|d| {
                 d.bus_type.as_deref() == Some("Bluetooth")
@@ -90,7 +105,6 @@ pub async fn list_devices() -> Result<Vec<DeviceInfo>, String> {
         });
 
         if let Some(existing) = merged {
-            // Merge BLE NUS info into the existing HID entry.
             existing.ble_id = ble.ble_id;
             if let Some(ref mut svcs) = existing.ble_services {
                 if let Some(new_svcs) = &ble.ble_services {
@@ -103,7 +117,6 @@ pub async fn list_devices() -> Result<Vec<DeviceInfo>, String> {
             } else {
                 existing.ble_services = ble.ble_services;
             }
-            // Add "hid" to services if the existing device is HID.
             if existing.kind == DeviceKind::Hid {
                 let svcs = existing.ble_services.get_or_insert_with(Vec::new);
                 if !svcs.contains(&"hid".to_string()) {
@@ -126,17 +139,16 @@ pub async fn scan_ble() -> Result<Vec<DeviceInfo>, String> {
 
 #[tauri::command]
 pub async fn connect(
+    tab_id: String,
     port: String,
     baud: u32,
     on_line: Channel<SerialLine>,
     state: State<'_, SharedState>,
-    log_buffer: State<'_, Arc<LogBuffer>>,
-    status_tracker: State<'_, Arc<StatusTracker>>,
 ) -> Result<(), String> {
     let mut app = state.lock().await;
+    let tab = app.get_or_create_tab(&tab_id);
 
-    // Shut down existing connection.
-    shutdown_connection(&mut app.connection).await;
+    shutdown_connection(&mut tab.connection).await;
 
     let assembler = LineAssembler::new();
 
@@ -156,17 +168,16 @@ pub async fn connect(
         .await
         .map_err(|e| e.to_string())?;
 
-    app.connection = ActiveConnection::Serial { engine, assembler };
+    tab.connection = ActiveConnection::Serial { engine, assembler };
 
-    status_tracker.set_serial(&port, baud);
+    tab.status_tracker.set_serial(&port, baud);
 
-    // Spawn a task that streams engine events → line assembler → Channel.
+    let log_buf = tab.log_buffer.clone();
+    let status = tab.status_tracker.clone();
     let state_clone = state.inner().clone();
-    let log_buf = log_buffer.inner().clone();
-    let status = status_tracker.inner().clone();
+    let tab_id_clone = tab_id.clone();
     tokio::spawn(async move {
         loop {
-            // Use a timeout so we can flush partial lines that don't end with \n.
             match tokio::time::timeout(
                 std::time::Duration::from_millis(100),
                 event_rx.recv(),
@@ -176,10 +187,14 @@ pub async fn connect(
                 Ok(Ok(Event::Data { bytes, .. })) => {
                     let lines = {
                         let mut app = state_clone.lock().await;
-                        if let ActiveConnection::Serial { ref mut assembler, .. } = app.connection {
-                            assembler.feed(&bytes, "received")
+                        if let Some(tab) = app.tabs.get_mut(&tab_id_clone) {
+                            if let ActiveConnection::Serial { ref mut assembler, .. } = tab.connection {
+                                assembler.feed(&bytes, "received")
+                            } else {
+                                Vec::new()
+                            }
                         } else {
-                            Vec::new()
+                            return;
                         }
                     };
                     for line in lines {
@@ -193,13 +208,17 @@ pub async fn connect(
                 Ok(Ok(Event::Connected { port, config, .. })) => {
                     let line = {
                         let app = state_clone.lock().await;
-                        if let ActiveConnection::Serial { ref assembler, .. } = app.connection {
-                            assembler.system_line(&format!(
-                                "Connected to {} at {} baud",
-                                port, config.baud_rate
-                            ))
+                        if let Some(tab) = app.tabs.get(&tab_id_clone) {
+                            if let ActiveConnection::Serial { ref assembler, .. } = tab.connection {
+                                assembler.system_line(&format!(
+                                    "Connected to {} at {} baud",
+                                    port, config.baud_rate
+                                ))
+                            } else {
+                                continue;
+                            }
                         } else {
-                            continue;
+                            return;
                         }
                     };
                     log_buf.push(LogEntry::Serial(line.clone()));
@@ -208,17 +227,21 @@ pub async fn connect(
                 Ok(Ok(Event::Disconnected { reason, .. })) => {
                     let lines = {
                         let mut app = state_clone.lock().await;
-                        if let ActiveConnection::Serial { ref mut assembler, .. } = app.connection {
-                            let mut result = Vec::new();
-                            if let Some(partial) = assembler.flush("received") {
-                                result.push(partial);
+                        if let Some(tab) = app.tabs.get_mut(&tab_id_clone) {
+                            if let ActiveConnection::Serial { ref mut assembler, .. } = tab.connection {
+                                let mut result = Vec::new();
+                                if let Some(partial) = assembler.flush("received") {
+                                    result.push(partial);
+                                }
+                                result.push(
+                                    assembler.system_line(&format!("Disconnected: {reason}")),
+                                );
+                                result
+                            } else {
+                                Vec::new()
                             }
-                            result.push(
-                                assembler.system_line(&format!("Disconnected: {reason}")),
-                            );
-                            result
                         } else {
-                            Vec::new()
+                            return;
                         }
                     };
                     for line in lines {
@@ -231,10 +254,14 @@ pub async fn connect(
                 Ok(Ok(Event::Error { message, .. })) => {
                     let line = {
                         let app = state_clone.lock().await;
-                        if let ActiveConnection::Serial { ref assembler, .. } = app.connection {
-                            assembler.system_line(&format!("Error: {message}"))
+                        if let Some(tab) = app.tabs.get(&tab_id_clone) {
+                            if let ActiveConnection::Serial { ref assembler, .. } = tab.connection {
+                                assembler.system_line(&format!("Error: {message}"))
+                            } else {
+                                continue;
+                            }
                         } else {
-                            continue;
+                            return;
                         }
                     };
                     log_buf.push(LogEntry::Serial(line.clone()));
@@ -243,13 +270,16 @@ pub async fn connect(
                 Ok(Ok(Event::Shutdown)) | Ok(Err(_)) => return,
                 Ok(Ok(_)) => {}
                 Err(_timeout) => {
-                    // Flush any partial line sitting in the buffer.
                     let partial = {
                         let mut app = state_clone.lock().await;
-                        if let ActiveConnection::Serial { ref mut assembler, .. } = app.connection {
-                            assembler.flush("received")
+                        if let Some(tab) = app.tabs.get_mut(&tab_id_clone) {
+                            if let ActiveConnection::Serial { ref mut assembler, .. } = tab.connection {
+                                assembler.flush("received")
+                            } else {
+                                None
+                            }
                         } else {
-                            None
+                            return;
                         }
                     };
                     if let Some(line) = partial {
@@ -266,21 +296,20 @@ pub async fn connect(
 
 #[tauri::command]
 pub async fn connect_hid(
+    tab_id: String,
     hid_path: String,
     vid: u16,
     pid: u16,
     on_report: Channel<HidReport>,
     state: State<'_, SharedState>,
-    log_buffer: State<'_, Arc<LogBuffer>>,
-    status_tracker: State<'_, Arc<StatusTracker>>,
 ) -> Result<(), String> {
     let mut app = state.lock().await;
+    let tab = app.get_or_create_tab(&tab_id);
 
-    // Shut down existing connection.
-    shutdown_connection(&mut app.connection).await;
+    shutdown_connection(&mut tab.connection).await;
 
-    let log_buf = log_buffer.inner().clone();
-    let status = status_tracker.inner().clone();
+    let log_buf = tab.log_buffer.clone();
+    let status = tab.status_tracker.clone();
 
     let hid_path_clone = hid_path.clone();
     let session = HidSession::open(hid_path, vid, pid, move |report| {
@@ -290,29 +319,26 @@ pub async fn connect_hid(
     })
     .await?;
 
-    status_tracker.set_hid(&hid_path_clone, None);
-
-    app.connection = ActiveConnection::Hid { session };
+    tab.status_tracker.set_hid(&hid_path_clone, None);
+    tab.connection = ActiveConnection::Hid { session };
 
     Ok(())
 }
 
 #[tauri::command]
 pub async fn connect_ble_nus(
+    tab_id: String,
     ble_id: String,
     on_line: Channel<SerialLine>,
     state: State<'_, SharedState>,
-    log_buffer: State<'_, Arc<LogBuffer>>,
-    status_tracker: State<'_, Arc<StatusTracker>>,
 ) -> Result<(), String> {
     let mut app = state.lock().await;
-    shutdown_connection(&mut app.connection).await;
+    let tab = app.get_or_create_tab(&tab_id);
+    shutdown_connection(&mut tab.connection).await;
 
-    let log_buf = log_buffer.inner().clone();
-    let status = status_tracker.inner().clone();
+    let log_buf = tab.log_buffer.clone();
+    let status = tab.status_tracker.clone();
 
-    // Try btleplug first (for advertising devices), fall back to native CoreBluetooth
-    // (for already-paired devices invisible to btleplug).
     let log_buf2 = log_buf.clone();
     let status2 = status.clone();
     let on_line2 = on_line.clone();
@@ -326,8 +352,8 @@ pub async fn connect_ble_nus(
     .await
     {
         Ok(session) => {
-            status_tracker.set_ble_nus(&ble_id);
-            app.connection = ActiveConnection::BleNus { session };
+            tab.status_tracker.set_ble_nus(&ble_id);
+            tab.connection = ActiveConnection::BleNus { session };
             Ok(())
         }
         #[cfg(target_os = "macos")]
@@ -340,8 +366,8 @@ pub async fn connect_ble_nus(
             })
             .await?;
 
-            status_tracker.set_ble_nus(&ble_id2);
-            app.connection = ActiveConnection::NativeBleNus { session };
+            tab.status_tracker.set_ble_nus(&ble_id2);
+            tab.connection = ActiveConnection::NativeBleNus { session };
             Ok(())
         }
         #[cfg(not(target_os = "macos"))]
@@ -351,20 +377,21 @@ pub async fn connect_ble_nus(
 
 #[tauri::command]
 pub async fn send_data(
+    tab_id: String,
     text: String,
     state: State<'_, SharedState>,
-    log_buffer: State<'_, Arc<LogBuffer>>,
 ) -> Result<(), String> {
-    // Log the sent line.
-    log_buffer.push(LogEntry::Serial(SerialLine {
+    let app = state.lock().await;
+    let tab = app.tabs.get(&tab_id).ok_or("Tab not found")?;
+
+    tab.log_buffer.push(LogEntry::Serial(SerialLine {
         timestamp: Local::now().format("%H:%M:%S%.3f").to_string(),
         text: text.clone(),
         kind: "sent",
         rx_bytes_total: 0,
     }));
 
-    let app = state.lock().await;
-    match &app.connection {
+    match &tab.connection {
         ActiveConnection::Serial { engine, .. } => {
             let sender = engine.cmd_sender();
             drop(app);
@@ -392,12 +419,14 @@ pub async fn send_data(
 
 #[tauri::command]
 pub async fn send_hid_report(
+    tab_id: String,
     data: Vec<u8>,
     report_type: String,
     state: State<'_, SharedState>,
 ) -> Result<(), String> {
     let app = state.lock().await;
-    match &app.connection {
+    let tab = app.tabs.get(&tab_id).ok_or("Tab not found")?;
+    match &tab.connection {
         ActiveConnection::Hid { session } => {
             match report_type.as_str() {
                 "feature" => session.send_feature_report(data).await,
@@ -410,10 +439,12 @@ pub async fn send_hid_report(
 
 #[tauri::command]
 pub async fn get_hid_descriptor(
+    tab_id: String,
     state: State<'_, SharedState>,
 ) -> Result<HidDescriptorInfo, String> {
     let app = state.lock().await;
-    match &app.connection {
+    let tab = app.tabs.get(&tab_id).ok_or("Tab not found")?;
+    match &tab.connection {
         ActiveConnection::Hid { session } => {
             let raw = session.raw_descriptor();
             Ok(hid_descriptor::parse_hid_descriptor(raw))
@@ -424,11 +455,13 @@ pub async fn get_hid_descriptor(
 
 #[tauri::command]
 pub async fn set_dtr(
+    tab_id: String,
     active: bool,
     state: State<'_, SharedState>,
 ) -> Result<(), String> {
     let app = state.lock().await;
-    if let ActiveConnection::Serial { ref engine, .. } = app.connection {
+    let tab = app.tabs.get(&tab_id).ok_or("Tab not found")?;
+    if let ActiveConnection::Serial { ref engine, .. } = tab.connection {
         engine
             .send(Command::SetDtr { active })
             .await
@@ -440,11 +473,13 @@ pub async fn set_dtr(
 
 #[tauri::command]
 pub async fn set_rts(
+    tab_id: String,
     active: bool,
     state: State<'_, SharedState>,
 ) -> Result<(), String> {
     let app = state.lock().await;
-    if let ActiveConnection::Serial { ref engine, .. } = app.connection {
+    let tab = app.tabs.get(&tab_id).ok_or("Tab not found")?;
+    if let ActiveConnection::Serial { ref engine, .. } = tab.connection {
         engine
             .send(Command::SetRts { active })
             .await
@@ -456,10 +491,12 @@ pub async fn set_rts(
 
 #[tauri::command]
 pub async fn send_break(
+    tab_id: String,
     state: State<'_, SharedState>,
 ) -> Result<(), String> {
     let app = state.lock().await;
-    if let ActiveConnection::Serial { ref engine, .. } = app.connection {
+    let tab = app.tabs.get(&tab_id).ok_or("Tab not found")?;
+    if let ActiveConnection::Serial { ref engine, .. } = tab.connection {
         engine
             .send(Command::SendBreak)
             .await
@@ -471,22 +508,28 @@ pub async fn send_break(
 
 #[tauri::command]
 pub async fn disconnect(
+    tab_id: String,
     state: State<'_, SharedState>,
-    status_tracker: State<'_, Arc<StatusTracker>>,
 ) -> Result<(), String> {
     let mut app = state.lock().await;
-    shutdown_connection(&mut app.connection).await;
-    status_tracker.set_disconnected();
+    if let Some(mut tab) = app.tabs.remove(&tab_id) {
+        shutdown_connection(&mut tab.connection).await;
+    }
     Ok(())
 }
 
 #[tauri::command]
 pub async fn export_log(
+    tab_id: String,
     path: String,
     format: String,
-    log_buffer: State<'_, Arc<LogBuffer>>,
+    state: State<'_, SharedState>,
 ) -> Result<usize, String> {
-    let entries = log_buffer.tail(MAX_EXPORT_ENTRIES);
+    let app = state.lock().await;
+    let tab = app.tabs.get(&tab_id).ok_or("Tab not found")?;
+    let entries = tab.log_buffer.tail(MAX_EXPORT_ENTRIES);
+    drop(app);
+
     let content = match format.as_str() {
         "csv" => {
             let mut out = String::from("timestamp,direction,text\n");
@@ -499,7 +542,6 @@ pub async fn export_log(
             out
         }
         _ => {
-            // Plain text format.
             let mut out = String::new();
             for e in &entries {
                 out.push_str(&e.format_line());

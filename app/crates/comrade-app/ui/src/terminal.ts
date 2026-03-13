@@ -44,7 +44,11 @@ export class TerminalUI {
   private searchActive = false;
 
   constructor() {
-    this.output = document.getElementById("output")!;
+    // Create a dedicated output container for this tab.
+    this.output = document.createElement("div");
+    this.output.className = "output";
+    document.getElementById("terminal-body")!.appendChild(this.output);
+
     this.statusPort = document.getElementById("status-port")!;
     this.statusConfig = document.getElementById("status-config")!;
     this.statusState = document.getElementById("status-state")!;
@@ -476,6 +480,22 @@ export class TerminalUI {
       this.activityLed.classList.remove("rx", "tx");
       this.activityTimer = null;
     }, 150);
+  }
+
+  /** Show this tab's output container. */
+  show(): void {
+    this.output.classList.remove("hidden");
+  }
+
+  /** Hide this tab's output container. */
+  hide(): void {
+    this.output.classList.add("hidden");
+  }
+
+  /** Remove this tab's output container from the DOM. */
+  destroy(): void {
+    this.output.remove();
+    this.contextMenu.remove();
   }
 
   private formatBytes(n: number): string {

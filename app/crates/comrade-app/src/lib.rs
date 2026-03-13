@@ -14,8 +14,6 @@ use std::sync::Arc;
 
 use auto_log::AutoLogger;
 use commands::{AppState, SharedState};
-use connection_status::StatusTracker;
-use log_buffer::LogBuffer;
 use tokio::sync::Mutex;
 
 pub fn run() {
@@ -26,23 +24,15 @@ pub fn run() {
         )
         .init();
 
-    let log_buffer = Arc::new(LogBuffer::new());
-    let status_tracker = Arc::new(StatusTracker::new());
     let auto_logger = Arc::new(AutoLogger::new());
-    log_buffer.set_auto_logger(auto_logger.clone());
 
-    let mcp_log_buffer = log_buffer.clone();
-    let mcp_status_tracker = status_tracker.clone();
-
-    let shared_state = Arc::new(Mutex::new(AppState::new())) as SharedState;
+    let shared_state = Arc::new(Mutex::new(AppState::new(auto_logger.clone()))) as SharedState;
     let mcp_shared_state = shared_state.clone();
     let shutdown_state = shared_state.clone();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(shared_state)
-        .manage(log_buffer)
-        .manage(status_tracker)
         .manage(auto_logger)
         .on_window_event({
             let state = shutdown_state;
@@ -51,17 +41,16 @@ pub fn run() {
                     let state = state.clone();
                     tauri::async_runtime::spawn(async move {
                         let mut app = state.lock().await;
-                        commands::shutdown_connection(&mut app.connection).await;
+                        for (_, tab) in app.tabs.drain() {
+                            let mut conn = tab.connection;
+                            commands::shutdown_connection(&mut conn).await;
+                        }
                     });
                 }
             }
         })
         .setup(|_app| {
-            tauri::async_runtime::spawn(mcp::start_mcp_server(
-                mcp_log_buffer,
-                mcp_status_tracker,
-                mcp_shared_state,
-            ));
+            tauri::async_runtime::spawn(mcp::start_mcp_server(mcp_shared_state));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
