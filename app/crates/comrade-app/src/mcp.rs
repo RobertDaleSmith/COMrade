@@ -10,6 +10,7 @@ use rmcp::transport::streamable_http_server::{
 };
 use rmcp::{schemars, tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler};
 use serde::Serialize;
+use tauri::Manager;
 use tracing::{info, warn};
 
 use crate::commands::{ActiveConnection, SharedState};
@@ -56,6 +57,18 @@ pub struct SendHidReportParams {
         description = "Report type: 'output' (default) or 'feature'"
     )]
     pub report_type: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ConnectDeviceParams {
+    #[schemars(description = "Connection type: 'serial', 'hid', or 'ble_nus'")]
+    pub connection_type: String,
+    #[schemars(description = "Device path: serial port path for serial, HID path for HID, or BLE peripheral ID for BLE NUS")]
+    pub path: String,
+    #[schemars(description = "Baud rate (only for serial connections, defaults to 115200)")]
+    pub baud: Option<u32>,
+    #[schemars(description = "Device name (optional, for display purposes)")]
+    pub device_name: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -222,6 +235,85 @@ impl ComradeMcp {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
+    #[tool(description = "Connect to a device and open a tab in the UI. Returns the tab_id for subsequent operations. If the device is already connected, returns the existing tab_id.")]
+    async fn connect_device(
+        &self,
+        Parameters(params): Parameters<ConnectDeviceParams>,
+    ) -> Result<CallToolResult, McpError> {
+        // Check if already connected to this device.
+        let app = self.shared_state.lock().await;
+        for (id, tab) in &app.tabs {
+            let status = tab.status_tracker.snapshot();
+            if status.device_path.as_deref() == Some(&params.path) {
+                return Ok(CallToolResult::success(vec![Content::text(format!(
+                    "Already connected in tab {id}"
+                ))]));
+            }
+        }
+
+        // Get app handle to invoke frontend connect.
+        let app_handle = app
+            .app_handle
+            .clone()
+            .ok_or_else(|| McpError::internal_error("App not ready".to_string(), None))?;
+        drop(app);
+
+        let name = params.device_name.as_deref().unwrap_or("Device");
+        let js = match params.connection_type.as_str() {
+            "serial" => {
+                let baud = params.baud.unwrap_or(115200);
+                format!(
+                    "window.__mcpConnect && window.__mcpConnect('serial', {}, {}, '{}')",
+                    serde_json::to_string(&params.path).unwrap_or_default(),
+                    baud,
+                    name.replace('\'', "\\'"),
+                )
+            }
+            "hid" => {
+                format!(
+                    "window.__mcpConnect && window.__mcpConnect('hid', {}, 0, '{}')",
+                    serde_json::to_string(&params.path).unwrap_or_default(),
+                    name.replace('\'', "\\'"),
+                )
+            }
+            "ble_nus" => {
+                format!(
+                    "window.__mcpConnect && window.__mcpConnect('ble_nus', {}, 0, '{}')",
+                    serde_json::to_string(&params.path).unwrap_or_default(),
+                    name.replace('\'', "\\'"),
+                )
+            }
+            other => {
+                return Err(McpError::invalid_request(
+                    format!("Unknown connection type: {other}. Use 'serial', 'hid', or 'ble_nus'."),
+                    None,
+                ));
+            }
+        };
+
+        if let Some(window) = app_handle.get_webview_window("main") {
+            window.eval(&js).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        }
+
+        // Wait briefly for the frontend to create the tab and backend to register it.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        // Find the newly created tab.
+        let app = self.shared_state.lock().await;
+        for (id, tab) in &app.tabs {
+            let status = tab.status_tracker.snapshot();
+            if status.device_path.as_deref() == Some(&params.path) {
+                return Ok(CallToolResult::success(vec![Content::text(format!(
+                    "Connected. Tab ID: {id}"
+                ))]));
+            }
+        }
+
+        Ok(CallToolResult::success(vec![Content::text(
+            "Connection initiated. Use get_status to check progress."
+        )]))
+    }
+
     #[tool(description = "Clear log entries. Optionally specify tab_id.")]
     async fn clear_logs(
         &self,
@@ -247,12 +339,16 @@ impl ComradeMcp {
             .get(&params.tab_id)
             .ok_or_else(|| McpError::invalid_request("Tab not found".to_string(), None))?;
 
-        tab.log_buffer.push(LogEntry::Serial(SerialLine {
+        let mcp_line = SerialLine {
             timestamp: Local::now().format("%H:%M:%S%.3f").to_string(),
             text: params.text.clone(),
-            kind: "sent",
+            kind: "mcp",
             rx_bytes_total: 0,
-        }));
+        };
+        tab.log_buffer.push(LogEntry::Serial(mcp_line.clone()));
+        if let Some(ref ch) = tab.line_channel {
+            let _ = ch.send(mcp_line);
+        }
 
         match &tab.connection {
             ActiveConnection::Serial { engine, .. } => {

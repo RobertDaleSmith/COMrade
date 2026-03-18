@@ -40,9 +40,11 @@
           <span class="mcp-label">MCP server running</span>
           <span class="mcp-icon" title="MCP server info">&#x2139;
             <div class="mcp-bubble">
-              <div class="mcp-bubble-title">MCP server running on port 9712</div>
+              <div class="mcp-bubble-title">MCP server on port 9712</div>
+              <div class="mcp-bubble-hint">Add to Claude Code (one-time):</div>
               <code id="mcp-cmd">claude mcp add --transport http comrade http://127.0.0.1:9712/mcp</code>
               <button id="mcp-copy-btn" title="Copy command">Copy</button>
+              <div class="mcp-bubble-hint">Start COMrade before Claude Code, or restart Claude Code to connect.</div>
             </div>
           </span>
         </div>
@@ -69,10 +71,8 @@
             <button id="break-btn" title="Send break signal">BRK</button>
           </span>
           <button id="autolog-btn" title="Toggle auto-logging to file">Log</button>
-          <button id="export-btn" title="Export log (⌘S)">Export</button>
           <button id="copy-btn" title="Copy log (⌘⇧C)">Copy</button>
           <button id="clear-btn" title="Clear log (⌘K)">Clear</button>
-          <button id="disconnect-btn" title="Disconnect">Disconnect</button>
         </div>
       </div>
       <div id="tab-bar" class="hidden">

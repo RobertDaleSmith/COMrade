@@ -42,12 +42,15 @@ pub(crate) struct TabState {
     pub connection: ActiveConnection,
     pub log_buffer: Arc<LogBuffer>,
     pub status_tracker: Arc<StatusTracker>,
+    /// Channel to push lines to the frontend (serial/NUS tabs).
+    pub line_channel: Option<Channel<SerialLine>>,
 }
 
 /// Shared application state managed by Tauri.
 pub struct AppState {
     pub(crate) tabs: HashMap<String, TabState>,
     pub(crate) auto_logger: Arc<AutoLogger>,
+    pub(crate) app_handle: Option<tauri::AppHandle>,
 }
 
 impl AppState {
@@ -55,6 +58,7 @@ impl AppState {
         Self {
             tabs: HashMap::new(),
             auto_logger,
+            app_handle: None,
         }
     }
 
@@ -67,6 +71,7 @@ impl AppState {
                 connection: ActiveConnection::None,
                 log_buffer,
                 status_tracker: Arc::new(StatusTracker::new()),
+                line_channel: None,
             }
         })
     }
@@ -94,7 +99,14 @@ pub async fn list_devices() -> Result<Vec<DeviceInfo>, String> {
         true
     });
 
-    let ble_devices = crate::ble_session::list_ble_devices().await.unwrap_or_default();
+    // BLE scan with timeout so it doesn't block the initial device list.
+    let ble_devices = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        crate::ble_session::list_ble_devices(),
+    )
+    .await
+    .unwrap_or(Ok(Vec::new()))
+    .unwrap_or_default();
 
     for ble in ble_devices {
         let merged = ble.product.as_ref().and_then(|ble_name| {
@@ -171,6 +183,7 @@ pub async fn connect(
     tab.connection = ActiveConnection::Serial { engine, assembler };
 
     tab.status_tracker.set_serial(&port, baud);
+    tab.line_channel = Some(on_line.clone());
 
     let log_buf = tab.log_buffer.clone();
     let status = tab.status_tracker.clone();
@@ -335,6 +348,8 @@ pub async fn connect_ble_nus(
     let mut app = state.lock().await;
     let tab = app.get_or_create_tab(&tab_id);
     shutdown_connection(&mut tab.connection).await;
+
+    tab.line_channel = Some(on_line.clone());
 
     let log_buf = tab.log_buffer.clone();
     let status = tab.status_tracker.clone();

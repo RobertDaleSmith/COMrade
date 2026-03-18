@@ -44,6 +44,7 @@ interface Tab {
   userDisconnected: boolean;
   reconnectCtx: ReconnectCtx | null;
   reconnectTimer: ReturnType<typeof setTimeout> | null;
+  reconnectDelay: number;
   lineChannel: Channel<SerialLine> | null;
   reportChannel: Channel<HidReport> | null;
   history: string[];
@@ -71,7 +72,7 @@ const refreshBtn = document.getElementById("refresh-btn")!;
 const inputEl = document.getElementById("input") as HTMLInputElement;
 const copyBtn = document.getElementById("copy-btn")!;
 const clearBtn = document.getElementById("clear-btn")!;
-const disconnectBtn = document.getElementById("disconnect-btn")!;
+const disconnectBtn = document.getElementById("disconnect-btn");
 const descriptorBtn = document.getElementById("descriptor-btn")!;
 const searchBtn = document.getElementById("search-btn")!;
 const searchBar = document.getElementById("search-bar")!;
@@ -119,14 +120,28 @@ function generateTabId(): string {
   return crypto.randomUUID();
 }
 
-function createTab(label: string): Tab {
+type TabKind = "serial" | "hid" | "ble";
+
+const TAB_ICONS: Record<TabKind, string> = {
+  serial: "CDC",
+  hid: "HID",
+  ble: "BLE",
+};
+
+function createTab(label: string, tooltip?: string, kind: TabKind = "serial"): Tab {
   const id = generateTabId();
   const terminal = new TerminalUI();
+  terminal.setTimestampsVisible(showTimestamps);
 
   // Create tab button in the tab bar.
   const tabBtn = document.createElement("div");
   tabBtn.className = "tab-btn";
   tabBtn.dataset.tabId = id;
+  if (tooltip) tabBtn.title = tooltip;
+
+  const tabIcon = document.createElement("span");
+  tabIcon.className = "tab-icon";
+  tabIcon.textContent = TAB_ICONS[kind];
 
   const tabLabel = document.createElement("span");
   tabLabel.className = "tab-label";
@@ -141,6 +156,7 @@ function createTab(label: string): Tab {
     closeTab(id);
   });
 
+  tabBtn.appendChild(tabIcon);
   tabBtn.appendChild(tabLabel);
   tabBtn.appendChild(closeBtn);
   tabBtn.addEventListener("click", () => switchTab(id));
@@ -159,6 +175,7 @@ function createTab(label: string): Tab {
     userDisconnected: false,
     reconnectCtx: null,
     reconnectTimer: null,
+    reconnectDelay: 2000,
     lineChannel: null,
     reportChannel: null,
     history: [],
@@ -176,6 +193,9 @@ function createTab(label: string): Tab {
 function switchTab(tabId: string): void {
   const tab = tabs.get(tabId);
   if (!tab) return;
+
+  // Hide inline device selector if showing.
+  hideInlineDeviceSelector();
 
   // Hide current tab's terminal.
   const current = activeTab();
@@ -272,7 +292,7 @@ async function refreshDevices(): Promise<void> {
 
     portListEl.innerHTML = "";
     if (devices.length === 0) {
-      portListEl.innerHTML = '<div class="no-ports">No devices found.</div>';
+      portListEl.innerHTML = '<div class="no-ports"><div class="no-ports-icon">\u{1F50C}</div><div>No devices found</div><div class="no-ports-hint">Connect a USB or BLE device to get started</div></div>';
       return;
     }
     for (const dev of devices) {
@@ -282,9 +302,10 @@ async function refreshDevices(): Promise<void> {
       const topRow = document.createElement("div");
       topRow.className = "port-item-top";
 
+      const devName = dev.product || dev.manufacturer || "Unknown device";
       const name = document.createElement("div");
       name.className = "port-name";
-      name.textContent = dev.product || dev.manufacturer || "Unknown device";
+      name.textContent = devName;
 
       const badges = document.createElement("div");
       badges.className = "device-badges";
@@ -309,7 +330,7 @@ async function refreshDevices(): Promise<void> {
 
       // Interface badges.
       if (dev.kind === "Both") {
-        addBadge("SERIAL", "badge-serial");
+        addBadge("CDC", "badge-serial");
         addBadge("HID", "badge-hid");
       } else if (dev.kind === "Ble") {
         if (svcs.includes("nus")) addBadge("NUS", "badge-serial");
@@ -317,7 +338,7 @@ async function refreshDevices(): Promise<void> {
       } else if (dev.kind === "Hid") {
         addBadge("HID", "badge-hid");
       } else if (dev.kind === "Serial") {
-        addBadge("SERIAL", "badge-serial");
+        addBadge("CDC", "badge-serial");
       }
 
       topRow.appendChild(name);
@@ -349,10 +370,10 @@ async function refreshDevices(): Promise<void> {
 
         const serialBtn = document.createElement("button");
         serialBtn.className = "port-action-btn";
-        serialBtn.textContent = "Connect Serial";
+        serialBtn.textContent = "Connect CDC";
         serialBtn.addEventListener("click", (e) => {
           e.stopPropagation();
-          connectToPort(dev.serial_path!);
+          connectToPort(dev.serial_path!, devName);
         });
 
         const hidBtn = document.createElement("button");
@@ -398,7 +419,7 @@ async function refreshDevices(): Promise<void> {
           );
         }
       } else if (dev.kind === "Serial") {
-        div.addEventListener("click", () => connectToPort(dev.serial_path || dev.path));
+        div.addEventListener("click", () => connectToPort(dev.serial_path || dev.path, devName));
       } else {
         div.addEventListener("click", () =>
           connectHid(dev.hid_path || dev.path, dev.product || dev.manufacturer || "HID Device", dev.vid ?? 0, dev.pid ?? 0)
@@ -419,21 +440,38 @@ function showTerminalView(tab: Tab): void {
   stopDeviceListPolling();
   lastDeviceListJson = "";
 
+  // If port-select is inline (inside terminal-body), move it back.
+  hideInlineDeviceSelector();
+
   portSelectEl.classList.add("hidden");
   terminalEl.classList.remove("hidden");
 
-  // Show tab bar when more than one tab.
   tabBar.classList.remove("hidden");
 
   switchTab(tab.id);
 }
 
+/** Find an existing tab already connected to this device. */
+function findExistingTab(type: string, id: string, vid?: number, pid?: number): Tab | undefined {
+  for (const tab of tabs.values()) {
+    const ctx = tab.reconnectCtx;
+    if (!ctx) continue;
+    if (type === "serial" && ctx.type === "serial" && ctx.port === id) return tab;
+    if (type === "hid" && ctx.type === "hid" && (ctx.hidPath === id || (vid != null && pid != null && ctx.vid === vid && ctx.pid === pid))) return tab;
+    if (type === "ble_nus" && ctx.type === "ble_nus" && ctx.bleId === id) return tab;
+  }
+  return undefined;
+}
+
 // ---- Serial connection ----
 
-async function connectToPort(port: string): Promise<void> {
+async function connectToPort(port: string, deviceName?: string): Promise<void> {
+  const existing = findExistingTab("serial", port);
+  if (existing) { showTerminalView(existing); return; }
+
   const baud = getSelectedBaud();
-  const label = port.split("/").pop() || port;
-  const tab = createTab(label);
+  const label = deviceName || port.split("/").pop() || port;
+  const tab = createTab(label, port, "serial");
 
   tab.isHidMode = false;
   showTerminalView(tab);
@@ -447,8 +485,7 @@ async function connectToPort(port: string): Promise<void> {
 
     if (line.kind === "system") {
       if (line.text.startsWith("Connected to")) {
-        tab.connected = true;
-        tab.wasConnected = true;
+        markConnected(tab);
         tab.terminal.setConnected(port, baud);
       } else if (line.text.startsWith("Disconnected:")) {
         tab.connected = false;
@@ -481,7 +518,10 @@ async function connectToPort(port: string): Promise<void> {
 // ---- HID connection ----
 
 async function connectHid(hidPath: string, deviceName: string, vid: number, pid: number): Promise<void> {
-  const tab = createTab(deviceName);
+  const existing = findExistingTab("hid", hidPath, vid, pid);
+  if (existing) { showTerminalView(existing); return; }
+
+  const tab = createTab(deviceName, hidPath, "hid");
 
   tab.isHidMode = true;
   showTerminalView(tab);
@@ -502,8 +542,7 @@ async function connectHid(hidPath: string, deviceName: string, vid: number, pid:
     }
 
     if (!tab.connected) {
-      tab.connected = true;
-      tab.wasConnected = true;
+      markConnected(tab);
       tab.terminal.setHidConnected(deviceName);
     }
 
@@ -512,8 +551,7 @@ async function connectHid(hidPath: string, deviceName: string, vid: number, pid:
 
   try {
     await invoke("connect_hid", { tabId: tab.id, hidPath, vid, pid, onReport: tab.reportChannel });
-    tab.connected = true;
-    tab.wasConnected = true;
+    markConnected(tab);
     tab.terminal.setHidConnected(deviceName);
   } catch (e) {
     tab.terminal.appendLine({
@@ -533,7 +571,10 @@ async function connectHid(hidPath: string, deviceName: string, vid: number, pid:
 // ---- BLE NUS connection ----
 
 async function connectBleNus(bleId: string, deviceName: string): Promise<void> {
-  const tab = createTab(deviceName);
+  const existing = findExistingTab("ble_nus", bleId);
+  if (existing) { showTerminalView(existing); return; }
+
+  const tab = createTab(deviceName, bleId, "ble");
 
   tab.isHidMode = false;
   showTerminalView(tab);
@@ -551,16 +592,14 @@ async function connectBleNus(bleId: string, deviceName: string): Promise<void> {
         scheduleReconnect(tab);
       }
     } else if (!tab.connected) {
-      tab.connected = true;
-      tab.wasConnected = true;
+      markConnected(tab);
       tab.terminal.setBleConnected(deviceName, "NUS");
     }
   };
 
   try {
     await invoke("connect_ble_nus", { tabId: tab.id, bleId, onLine: tab.lineChannel });
-    tab.connected = true;
-    tab.wasConnected = true;
+    markConnected(tab);
     tab.terminal.setBleConnected(deviceName, "NUS");
   } catch (e) {
     tab.terminal.appendLine({
@@ -577,17 +616,27 @@ async function connectBleNus(bleId: string, deviceName: string): Promise<void> {
   inputEl.focus();
 }
 
+function markConnected(tab: Tab): void {
+  tab.connected = true;
+  tab.wasConnected = true;
+  tab.reconnectDelay = 2000;
+}
+
 // ---- Reconnect ----
 
 function scheduleReconnect(tab: Tab): void {
   if (tab.userDisconnected || !tab.reconnectCtx) return;
   stopReconnect(tab);
 
+  const delay = tab.reconnectDelay;
   tab.terminal.setReconnecting();
 
   tab.reconnectTimer = setTimeout(async () => {
     tab.reconnectTimer = null;
     if (tab.userDisconnected || !tab.reconnectCtx) return;
+
+    // Increase delay for next attempt (exponential backoff, max 30s).
+    tab.reconnectDelay = Math.min(tab.reconnectDelay * 2, 30000);
 
     if (tab.reconnectCtx.type === "serial") {
       await reconnectSerial(tab, tab.reconnectCtx.port, tab.reconnectCtx.baud);
@@ -610,7 +659,7 @@ function scheduleReconnect(tab: Tab): void {
     } else if (tab.reconnectCtx.type === "ble_nus") {
       await reconnectBleNus(tab, tab.reconnectCtx.bleId, tab.reconnectCtx.deviceName);
     }
-  }, 2000);
+  }, delay);
 }
 
 function stopReconnect(tab: Tab): void {
@@ -628,8 +677,7 @@ async function reconnectSerial(tab: Tab, port: string, baud: number): Promise<vo
     tab.terminal.appendLine(line);
     if (line.kind === "system") {
       if (line.text.startsWith("Connected to")) {
-        tab.connected = true;
-        tab.wasConnected = true;
+        markConnected(tab);
         tab.terminal.setConnected(port, baud);
       } else if (line.text.startsWith("Disconnected:")) {
         tab.connected = false;
@@ -656,16 +704,14 @@ async function reconnectHid(tab: Tab, hidPath: string, deviceName: string, vid: 
       return;
     }
     if (!tab.connected) {
-      tab.connected = true;
-      tab.wasConnected = true;
+      markConnected(tab);
       tab.terminal.setHidConnected(deviceName);
     }
     tab.terminal.appendHidReport(report);
   };
   try {
     await invoke("connect_hid", { tabId: tab.id, hidPath, vid, pid, onReport: tab.reportChannel });
-    tab.connected = true;
-    tab.wasConnected = true;
+    markConnected(tab);
     tab.terminal.setHidConnected(deviceName);
   } catch {
     scheduleReconnect(tab);
@@ -680,15 +726,13 @@ async function reconnectBleNus(tab: Tab, bleId: string, deviceName: string): Pro
       tab.connected = false;
       scheduleReconnect(tab);
     } else if (!tab.connected) {
-      tab.connected = true;
-      tab.wasConnected = true;
+      markConnected(tab);
       tab.terminal.setBleConnected(deviceName, "NUS");
     }
   };
   try {
     await invoke("connect_ble_nus", { tabId: tab.id, bleId, onLine: tab.lineChannel });
-    tab.connected = true;
-    tab.wasConnected = true;
+    markConnected(tab);
     tab.terminal.setBleConnected(deviceName, "NUS");
   } catch {
     scheduleReconnect(tab);
@@ -718,13 +762,39 @@ function showPortSelect(): void {
 
 // ---- New tab button ----
 
-newTabBtn.addEventListener("click", () => {
-  // Show device selector to pick a new device.
-  stopDeviceListPolling();
+const terminalBody = document.getElementById("terminal-body")!;
+const portSelectParent = portSelectEl.parentElement!;
+
+/** Show device selector inline within terminal-body (tabs stay visible). */
+function showInlineDeviceSelector(): void {
+  // Hide active tab output.
+  const current = activeTab();
+  if (current) {
+    current.terminal.hide();
+    current.tabBtn.classList.remove("active");
+  }
+  activeTabId = null;
+
+  // Move port-select into terminal-body.
+  portSelectEl.classList.add("inline");
+  terminalBody.appendChild(portSelectEl);
   portSelectEl.classList.remove("hidden");
-  // Keep terminal visible behind so user can switch back via tabs.
+
+  lastDeviceListJson = "";
   refreshDevices();
   startDeviceListPolling();
+}
+
+/** Move port-select back to its original position outside terminal. */
+function hideInlineDeviceSelector(): void {
+  portSelectEl.classList.remove("inline");
+  portSelectEl.classList.add("hidden");
+  portSelectParent.appendChild(portSelectEl);
+  stopDeviceListPolling();
+}
+
+newTabBtn.addEventListener("click", () => {
+  showInlineDeviceSelector();
 });
 
 // ---- Input handling ----
@@ -925,6 +995,15 @@ inputEl.addEventListener("keydown", (e: KeyboardEvent) => {
 
 document.addEventListener("keydown", (e: KeyboardEvent) => {
   const tab = activeTab();
+  if ((e.metaKey || e.ctrlKey) && e.key === "w") {
+    e.preventDefault();
+    if (tab) {
+      tab.userDisconnected = true;
+      stopReconnect(tab);
+      closeTab(tab.id);
+    }
+    return;
+  }
   if ((e.metaKey || e.ctrlKey) && e.key === "k") {
     e.preventDefault();
     tab?.terminal.clear();
@@ -953,10 +1032,6 @@ document.addEventListener("keydown", (e: KeyboardEvent) => {
         });
       }
     }).catch((e) => console.error("debug_ble:", e));
-  }
-  if ((e.metaKey || e.ctrlKey) && e.key === "s") {
-    e.preventDefault();
-    if (tab) exportLog();
   }
   if ((e.metaKey || e.ctrlKey) && e.key === "f") {
     e.preventDefault();
@@ -1087,7 +1162,7 @@ mcpCopyBtn.addEventListener("click", async () => {
 
 // ---- Event listeners ----
 
-const exportBtn = document.getElementById("export-btn")!;
+const exportBtn = document.getElementById("export-btn");
 
 dtrBtn.addEventListener("click", async () => {
   const tab = activeTab();
@@ -1144,11 +1219,44 @@ document.getElementById("status-rx")!.addEventListener("click", () => {
 });
 
 refreshBtn.addEventListener("click", refreshDevices);
-exportBtn.addEventListener("click", exportLog);
+exportBtn?.addEventListener("click", exportLog);
 copyBtn.addEventListener("click", copyLog);
 clearBtn.addEventListener("click", () => activeTab()?.terminal.clear());
-disconnectBtn.addEventListener("click", disconnect);
+disconnectBtn?.addEventListener("click", disconnect);
 descriptorBtn.addEventListener("click", toggleDescriptor);
+
+// ---- Menu events ----
+
+let showTimestamps = true;
+
+(window as any).__toggleTimestamps = (visible: boolean) => {
+  showTimestamps = visible;
+  for (const tab of tabs.values()) {
+    tab.terminal.setTimestampsVisible(visible);
+  }
+};
+
+(window as any).__newTab = () => {
+  if (tabs.size > 0) {
+    showInlineDeviceSelector();
+  } else {
+    showPortSelect();
+  }
+};
+
+(window as any).__mcpConnect = (type: string, path: string, baud: number, name: string) => {
+  if (type === "serial") {
+    connectToPort(path, name);
+  } else if (type === "hid") {
+    connectHid(path, name, 0, 0);
+  } else if (type === "ble_nus") {
+    connectBleNus(path, name);
+  }
+};
+
+(window as any).__exportLog = () => {
+  exportLog();
+};
 
 // ---- Init ----
 

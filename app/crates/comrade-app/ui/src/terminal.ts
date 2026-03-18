@@ -2,7 +2,7 @@
 export interface SerialLine {
   timestamp: string;
   text: string;
-  kind: "received" | "sent" | "system";
+  kind: "received" | "sent" | "system" | "mcp";
   rx_bytes_total: number;
 }
 
@@ -27,7 +27,12 @@ export class TerminalUI {
   private statusRx: HTMLElement;
   private autoScroll = true;
   private maxLines = 10000;
+  private timestampsVisible = true;
   private hidReportCount = 0;
+  private pendingFragment: DocumentFragment = document.createDocumentFragment();
+  private flushScheduled = false;
+  private lastRxLine: SerialLine | null = null;
+  private lastHidReport: HidReport | null = null;
   private contextMenu: HTMLElement;
   private contextTarget: HTMLElement | null = null;
   private activityLed: HTMLElement;
@@ -44,9 +49,9 @@ export class TerminalUI {
   private searchActive = false;
 
   constructor() {
-    // Create a dedicated output container for this tab.
+    // Create a dedicated output container for this tab (hidden until activated).
     this.output = document.createElement("div");
-    this.output.className = "output";
+    this.output.className = "output hidden";
     document.getElementById("terminal-body")!.appendChild(this.output);
 
     this.statusPort = document.getElementById("status-port")!;
@@ -125,7 +130,7 @@ export class TerminalUI {
     this.contextTarget = null;
   }
 
-  /** Append a line to the terminal output. */
+  /** Append a line to the terminal output (batched). */
   appendLine(line: SerialLine): void {
     const div = document.createElement("div");
     div.className = `line ${line.kind}`;
@@ -140,21 +145,13 @@ export class TerminalUI {
 
     div.appendChild(ts);
     div.appendChild(text);
-    this.output.appendChild(div);
+    this.pendingFragment.appendChild(div);
 
-    if (this.searchActive) {
-      this.applySearchToLine(div);
-    }
-
-    // Update RX counter and activity LED.
-    this.statusRx.textContent = `RX: ${this.formatBytes(line.rx_bytes_total)}`;
-    if (line.kind === "received") this.pulseActivity("rx");
-    else if (line.kind === "sent") this.pulseActivity("tx");
-
-    this.trimAndScroll();
+    this.lastRxLine = line;
+    this.scheduleFlush();
   }
 
-  /** Append a HID report to the terminal output. */
+  /** Append a HID report to the terminal output (batched). */
   appendHidReport(report: HidReport): void {
     this.hidReportCount = report.report_count;
     const div = document.createElement("div");
@@ -179,15 +176,50 @@ export class TerminalUI {
 
     div.appendChild(ts);
     div.appendChild(text);
-    this.output.appendChild(div);
+    this.pendingFragment.appendChild(div);
 
+    this.lastHidReport = report;
+    this.scheduleFlush();
+  }
+
+  /** Schedule a batched DOM flush on the next animation frame. */
+  private scheduleFlush(): void {
+    if (this.flushScheduled) return;
+    this.flushScheduled = true;
+    requestAnimationFrame(() => this.flushPending());
+  }
+
+  /** Flush all pending lines to the DOM in one batch. */
+  private flushPending(): void {
+    this.flushScheduled = false;
+
+    // Append all pending elements at once.
+    this.output.appendChild(this.pendingFragment);
+    this.pendingFragment = document.createDocumentFragment();
+
+    // Apply search to newly added lines.
     if (this.searchActive) {
-      this.applySearchToLine(div);
+      const lines = this.output.querySelectorAll(".line:not([data-searched])");
+      for (const div of Array.from(lines)) {
+        (div as HTMLElement).setAttribute("data-searched", "1");
+        this.applySearchToLine(div as HTMLElement);
+      }
     }
 
-    // Update RX counter with report count and activity LED.
-    this.statusRx.textContent = `RX: ${this.formatBytes(report.rx_bytes_total)} (${report.report_count} reports)`;
-    this.pulseActivity("rx");
+    // Update status bar from latest data.
+    if (this.lastHidReport) {
+      const r = this.lastHidReport;
+      this.statusRx.textContent = `RX: ${this.formatBytes(r.rx_bytes_total)} (${r.report_count} reports)`;
+      this.pulseActivity("rx");
+      this.lastHidReport = null;
+    }
+    if (this.lastRxLine) {
+      const l = this.lastRxLine;
+      this.statusRx.textContent = `RX: ${this.formatBytes(l.rx_bytes_total)}`;
+      if (l.kind === "received") this.pulseActivity("rx");
+      else if (l.kind === "sent" || l.kind === "mcp") this.pulseActivity("tx");
+      this.lastRxLine = null;
+    }
 
     this.trimAndScroll();
   }
@@ -480,6 +512,12 @@ export class TerminalUI {
       this.activityLed.classList.remove("rx", "tx");
       this.activityTimer = null;
     }, 150);
+  }
+
+  /** Set whether timestamps are visible. */
+  setTimestampsVisible(visible: boolean): void {
+    this.timestampsVisible = visible;
+    this.output.classList.toggle("hide-timestamps", !visible);
   }
 
   /** Show this tab's output container. */

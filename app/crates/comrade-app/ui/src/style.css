@@ -46,6 +46,12 @@ body {
   display: none;
 }
 
+#port-select.inline {
+  flex: 1;
+  height: auto;
+  border-top: none;
+}
+
 .port-sidebar {
   display: flex;
   flex-direction: column;
@@ -71,7 +77,6 @@ body {
   color: var(--accent-red);
   margin-bottom: 8px;
   font-weight: 700;
-  text-transform: uppercase;
   letter-spacing: 2px;
   padding-bottom: 8px;
   border-bottom: 2px solid var(--accent-red);
@@ -361,6 +366,15 @@ body {
   user-select: text;
 }
 
+.mcp-bubble-hint {
+  font-family: var(--font-ui);
+  font-size: 10px;
+  color: var(--fg-tertiary);
+  white-space: normal;
+  max-width: 280px;
+  line-height: 1.4;
+}
+
 .mcp-bubble button {
   font-family: var(--font-ui);
   font-size: 11px;
@@ -382,7 +396,22 @@ body {
   font-family: var(--font-ui);
   color: var(--fg-secondary);
   text-align: center;
-  padding: 24px;
+  padding: 48px 24px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.no-ports-icon {
+  font-size: 36px;
+  opacity: 0.4;
+  margin-bottom: 4px;
+}
+
+.no-ports-hint {
+  font-size: 12px;
+  color: var(--fg-tertiary);
 }
 
 /* ---- Terminal ---- */
@@ -409,6 +438,10 @@ body {
   padding: 8px 12px;
   -webkit-user-select: text;
   user-select: text;
+}
+
+.output.hidden {
+  display: none;
 }
 
 .output::-webkit-scrollbar {
@@ -439,6 +472,10 @@ body {
   margin-right: 8px;
 }
 
+.hide-timestamps .line .ts {
+  display: none;
+}
+
 .line.received .text {
   color: var(--fg-primary);
 }
@@ -456,6 +493,16 @@ body {
 .line.system .text {
   color: var(--fg-secondary);
   font-style: italic;
+}
+
+.line.mcp .text {
+  color: #5B9BD5;
+  font-weight: bold;
+}
+
+.line.mcp .text::before {
+  content: "[MCP] > ";
+  color: #5B9BD5;
 }
 
 /* HID report lines */
@@ -492,6 +539,7 @@ body {
   align-items: center;
   gap: 6px;
   padding: 4px 12px;
+  min-width: 120px;
   font-family: var(--font-ui);
   font-size: 12px;
   color: var(--fg-secondary);
@@ -501,6 +549,10 @@ body {
   white-space: nowrap;
 }
 
+.tab-btn .tab-label {
+  flex: 1;
+}
+
 .tab-btn:hover {
   color: var(--fg-primary);
 }
@@ -508,6 +560,18 @@ body {
 .tab-btn.active {
   color: var(--fg-primary);
   border-bottom-color: var(--accent-red);
+}
+
+.tab-icon {
+  font-family: var(--font-ui);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  color: var(--fg-tertiary);
+  background: var(--bg-elevated);
+  padding: 1px 4px;
+  border-radius: 2px;
+  line-height: 1.2;
 }
 
 .tab-label {
