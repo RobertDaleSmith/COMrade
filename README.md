@@ -1,6 +1,6 @@
 # COMrade
 
-A modern serial & HID device monitor for hardware hackers, firmware engineers, and embedded developers.
+A modern serial, HID, and BLE device monitor for hardware hackers, firmware engineers, and embedded developers.
 
 Built in Rust with a native macOS GUI (Tauri v2), a terminal UI (ratatui), and a raw CLI mode.
 
@@ -8,12 +8,19 @@ Built in Rust with a native macOS GUI (Tauri v2), a terminal UI (ratatui), and a
 
 ## Features
 
-### Serial Monitoring
+### Multi-Device Tabbed Interface
+- Open multiple device connections simultaneously in tabs
+- CDC, HID, and BLE tab badges for quick identification
+- Cmd+T to open new tab, Cmd+W to close, click to switch
+- Device selector appears inline when adding tabs (existing tabs stay accessible)
+- Duplicate detection — connecting to an already-open device switches to its tab
+
+### Serial Monitoring (USB CDC)
 - Connect to any serial port (USB CDC, FTDI, CH340, CP210x, etc.)
 - Configurable baud rate (9600 to 2M), data bits, parity, stop bits, flow control
-- Auto-asserts DTR for Arduino/CDC devices
-- Timestamped, color-coded output (received / sent / system)
-- Auto-reconnect on device disconnect
+- DTR/RTS toggle controls with break signal support
+- Timestamped, color-coded output (received / sent / system / MCP)
+- Auto-reconnect with exponential backoff (2s → 30s)
 - 10,000-line scrollback with smart auto-scroll
 
 ### HID Device Support
@@ -22,19 +29,44 @@ Built in Rust with a native macOS GUI (Tauri v2), a terminal UI (ratatui), and a
 - View raw and parsed HID report descriptors with usage table lookups
 - Non-exclusive device access on macOS (doesn't steal device from system)
 
+### BLE NUS (Nordic UART Service)
+- Discover BLE NUS devices via btleplug scan
+- Native CoreBluetooth fallback for paired macOS devices invisible to btleplug
+- Full NUS session: connect, discover services, subscribe to TX notifications, write to RX
+- BLE devices merged with HID entries when same device exposes both services
+
 ### Unified Device Discovery
-- Single device list merges serial and HID interfaces by USB VID/PID
-- Devices classified as Serial, HID, or Both
+- Single device list merges serial, HID, and BLE interfaces
+- Transport badges (USB, BT) and interface badges (CDC, HID, NUS)
 - Composite devices offer per-interface connect buttons
 - Filters macOS system devices (debug console, Bluetooth, Apple HID)
+- Split-pane device selector: sidebar with controls, full-height scrollable device list
+
+### MCP Server (Claude Integration)
+- Built-in MCP server on port 9712 for AI-assisted debugging
+- Tools: `list_devices`, `connect_device`, `get_status`, `get_logs`, `search_logs`, `send_serial`, `send_hid_report`, `clear_logs`
+- MCP-sent commands appear in terminal log with `[MCP]` prefix
+- Multi-tab aware — all tools accept `tab_id` for routing
+
+### Logging & Export
+- Auto-log to file with timestamped entries
+- Export to text or CSV via File > Export (Cmd+S)
+- Copy full log to clipboard (Cmd+Shift+C)
+- Search with regex/substring, match navigation, dimmed non-matches
 
 ### Three Interfaces
 
 | Interface | Command | Best for |
 |-----------|---------|----------|
-| **GUI** | `make dev` | Daily use, HID inspection, visual monitoring |
+| **GUI** | `make dev` | Daily use, multi-device, HID/BLE, visual monitoring |
 | **TUI** | `comrade <port>` | SSH sessions, terminal workflows |
 | **Raw** | `comrade --raw <port>` | Shell pipelines, logging to file |
+
+### UART Bridge Firmware
+- RP2040 PIO-based USB CDC ↔ UART bridge
+- Auto-detects TX/RX pin orientation on any GPIO pair
+- Pico W variant adds BLE NUS wireless serial bridge
+- Configurable via `$CB:` commands (pins, baud, LED, save to flash)
 
 ## Prerequisites
 
@@ -71,11 +103,19 @@ cargo test --workspace               # Run all tests
 cargo clippy --workspace -- -D warnings  # Lint
 ```
 
-### Frontend (from `crates/comrade-app/ui/`)
+### Frontend (from `app/crates/comrade-app/ui/`)
 
 ```bash
 npm install                          # Install dependencies
 npm run build                        # TypeScript + Vite production build
+```
+
+### Firmware (requires Pico SDK)
+
+```bash
+export PICO_SDK_PATH=~/pico-sdk
+make firmware                        # Standard RP2040 build
+make firmware-w                      # Pico W build (BLE NUS)
 ```
 
 ### Makefile Targets
@@ -85,7 +125,21 @@ npm run build                        # TypeScript + Vite production build
 | `make dev` | `cargo tauri dev` with Vite live reload |
 | `make build` | `cargo tauri build` (.app bundle) |
 | `make list` | List available devices via CLI |
+| `make firmware` | Build RP2040 UART bridge firmware |
+| `make firmware-w` | Build Pico W firmware with BLE NUS |
 | `make clean` | `cargo clean` + remove frontend dist |
+
+## MCP Setup (Claude Integration)
+
+COMrade includes a built-in MCP server that lets Claude Code interact with connected devices.
+
+```bash
+# One-time setup — add COMrade as an MCP server
+claude mcp add --transport http comrade http://127.0.0.1:9712/mcp
+
+# Start COMrade before launching Claude Code
+# Claude can then list devices, open connections, read logs, and send commands
+```
 
 ## CLI Reference
 
@@ -131,13 +185,31 @@ comrade --raw /dev/cu.usbserial-1420 2>/dev/null | grep "ERROR"
 
 | Shortcut | Action |
 |----------|--------|
-| `Enter` | Send input |
-| `Up/Down` | Navigate input history |
+| `Cmd+T` | New tab (open device selector) |
+| `Cmd+W` | Close current tab |
+| `Cmd+S` | Export log |
+| `Cmd+F` | Search logs |
 | `Cmd+K` | Clear terminal |
 | `Cmd+Shift+C` | Copy full log to clipboard |
+| `Cmd+C` | Copy selection |
+| `Enter` | Send input |
+| `Up/Down` | Navigate input history |
 | `Escape` | Scroll to bottom |
 
 ## Architecture
+
+```
+app/
+  crates/
+    comrade-protocol/     Pure data types (Command, Event, SerialConfig, DeviceInfo)
+    comrade-core/         Async engine (serial I/O, device enumeration)
+    comrade-cli/          CLI binary (TUI + raw modes)
+    comrade-app/          Tauri v2 GUI application
+      ui/                 TypeScript + Vite frontend
+firmware/
+  src/                    RP2040 UART bridge + BLE NUS (Pico W)
+scripts/                  Build helpers
+```
 
 Four crates in a layered architecture:
 
@@ -148,34 +220,6 @@ comrade-cli (TUI/raw)     comrade-app (Tauri GUI)
                 |
           comrade-protocol (types)
 ```
-
-See [docs/architecture.md](docs/architecture.md) for detailed design documentation.
-
-## Project Structure
-
-```
-crates/
-  comrade-protocol/     Pure data types (Command, Event, SerialConfig, DeviceInfo)
-  comrade-core/         Async engine (serial I/O, device enumeration)
-  comrade-cli/          CLI binary (TUI + raw modes)
-  comrade-app/          Tauri v2 GUI application
-    ui/                 TypeScript + Vite frontend
-docs/
-  architecture.md       System design and internals
-  architecture-gui.md   GUI-specific architecture
-  research-landscape.md Competitive analysis and market research
-  comrade_design_language.md  Visual identity and branding guide
-```
-
-## Supported Baud Rates
-
-9600, 19200, 38400, 57600, **115200** (default), 230400, 460800, 921600, 1000000, 2000000
-
-## CI/CD
-
-GitHub Actions runs on every push to `main` and on pull requests:
-- **Test**: `cargo test --workspace` + `cargo clippy` on macOS
-- **Build**: macOS .app bundles for arm64 and x86_64 (main branch only, draft releases via `tauri-action`)
 
 ## License
 
