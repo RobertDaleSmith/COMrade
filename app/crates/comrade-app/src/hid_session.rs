@@ -145,10 +145,10 @@ impl HidSession {
                 // hidapi read failed — fall back to nusb.
                 warn!("hidapi read failed ({e}), falling back to nusb");
                 drop(device);
-                match open_nusb_reader(vid, pid) {
-                    Ok(mut reader) => {
+                match open_nusb_readers(vid, pid) {
+                    Ok(mut readers) => {
                         nusb_read_loop(
-                            &mut reader,
+                            &mut readers,
                             &mut cmd_rx,
                             &mut report_count,
                             &mut rx_bytes_total,
@@ -272,11 +272,17 @@ fn process_report<F>(
     });
 }
 
-/// Open a nusb interrupt IN reader for the HID interface of a device.
-fn open_nusb_reader(
+/// Holds a nusb interface claim and its interrupt IN reader.
+struct NusbReader {
+    reader: nusb::io::EndpointRead<Interrupt>,
+    _interface: nusb::Interface,
+}
+
+/// Open nusb interrupt IN readers for ALL HID interfaces of a device.
+fn open_nusb_readers(
     vid: u16,
     pid: u16,
-) -> Result<nusb::io::EndpointRead<Interrupt>, String> {
+) -> Result<Vec<NusbReader>, String> {
     let dev_info = nusb::list_devices()
         .wait()
         .map_err(|e| format!("nusb enumerate: {e}"))?
@@ -292,11 +298,11 @@ fn open_nusb_reader(
         .active_configuration()
         .map_err(|e| format!("nusb config: {e}"))?;
 
-    // Find HID interface (class 0x03) with an interrupt IN endpoint.
-    let (intf_num, ep_addr) = config
+    // Find ALL HID interfaces (class 0x03) with interrupt IN endpoints.
+    let hid_endpoints: Vec<(u8, u8)> = config
         .interface_alt_settings()
         .filter(|i| i.class() == 0x03)
-        .find_map(|i| {
+        .filter_map(|i| {
             i.endpoints()
                 .find(|e| {
                     e.transfer_type() == TransferType::Interrupt
@@ -304,28 +310,42 @@ fn open_nusb_reader(
                 })
                 .map(|e| (i.interface_number(), e.address()))
         })
-        .ok_or("No HID interrupt IN endpoint found")?;
+        .collect();
 
-    info!("nusb: claiming interface {intf_num}, endpoint 0x{ep_addr:02X}");
+    if hid_endpoints.is_empty() {
+        return Err("No HID interrupt IN endpoints found".to_string());
+    }
 
-    let interface = device
-        .detach_and_claim_interface(intf_num)
-        .wait()
-        .map_err(|e| format!("nusb claim interface {intf_num}: {e}"))?;
+    let mut readers = Vec::new();
+    for (intf_num, ep_addr) in hid_endpoints {
+        info!("nusb: claiming interface {intf_num}, endpoint 0x{ep_addr:02X}");
 
-    let endpoint = interface
-        .endpoint::<Interrupt, In>(ep_addr)
-        .map_err(|e| format!("nusb endpoint: {e}"))?;
+        let interface = device
+            .detach_and_claim_interface(intf_num)
+            .wait()
+            .map_err(|e| format!("nusb claim interface {intf_num}: {e}"))?;
 
-    let max_packet = endpoint.max_packet_size();
-    Ok(endpoint
-        .reader(max_packet)
-        .with_read_timeout(Duration::from_millis(100)))
+        let endpoint = interface
+            .endpoint::<Interrupt, In>(ep_addr)
+            .map_err(|e| format!("nusb endpoint: {e}"))?;
+
+        let max_packet = endpoint.max_packet_size();
+        let reader = endpoint
+            .reader(max_packet)
+            .with_read_timeout(Duration::from_millis(100));
+
+        readers.push(NusbReader {
+            reader,
+            _interface: interface,
+        });
+    }
+
+    Ok(readers)
 }
 
-/// Read loop using nusb, same structure as the hidapi loop but via std::io::Read.
+/// Read loop using nusb, polls all HID interface readers round-robin.
 fn nusb_read_loop<F>(
-    reader: &mut nusb::io::EndpointRead<Interrupt>,
+    readers: &mut [NusbReader],
     cmd_rx: &mut mpsc::Receiver<HidCommand>,
     report_count: &mut u64,
     rx_bytes_total: &mut u64,
@@ -333,7 +353,7 @@ fn nusb_read_loop<F>(
 ) where
     F: Fn(HidReport),
 {
-    info!("nusb: read loop started");
+    info!("nusb: read loop started ({} interface(s))", readers.len());
     let mut buf = vec![0u8; 4096];
 
     loop {
@@ -356,32 +376,35 @@ fn nusb_read_loop<F>(
             }
         }
 
-        // Read with timeout (set via with_read_timeout on the reader).
-        match reader.read(&mut buf) {
-            Ok(0) => {
-                // No data.
+        // Poll all readers round-robin.
+        let mut any_error = false;
+        for nusb_reader in readers.iter_mut() {
+            match nusb_reader.reader.read(&mut buf) {
+                Ok(0) => {}
+                Ok(n) => {
+                    process_report(&buf[..n], report_count, rx_bytes_total, on_report);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {}
+                Err(e) => {
+                    error!("nusb read error: {e}");
+                    let now = Local::now().format("%H:%M:%S%.3f").to_string();
+                    on_report(HidReport {
+                        timestamp: now,
+                        data: Vec::new(),
+                        hex: format!("nusb read error: {e}"),
+                        ascii: String::new(),
+                        report_id: None,
+                        report_count: *report_count,
+                        rx_bytes_total: *rx_bytes_total,
+                        kind: "error",
+                    });
+                    any_error = true;
+                    break;
+                }
             }
-            Ok(n) => {
-                process_report(&buf[..n], report_count, rx_bytes_total, on_report);
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
-                // Timeout — loop back to check commands.
-            }
-            Err(e) => {
-                error!("nusb read error: {e}");
-                let now = Local::now().format("%H:%M:%S%.3f").to_string();
-                on_report(HidReport {
-                    timestamp: now,
-                    data: Vec::new(),
-                    hex: format!("nusb read error: {e}"),
-                    ascii: String::new(),
-                    report_id: None,
-                    report_count: *report_count,
-                    rx_bytes_total: *rx_bytes_total,
-                    kind: "error",
-                });
-                break;
-            }
+        }
+        if any_error {
+            break;
         }
     }
 

@@ -124,7 +124,14 @@ pub fn enumerate_devices() -> Result<Vec<DeviceInfo>, CoreError> {
                 bus_type: bus.clone(),
             });
 
-            entry.hid_path = Some(hid_path);
+            // Prefer HID path with Generic Desktop usage page (0x01) — this is
+            // usually the interface with gamepad/mouse/keyboard input reports.
+            // Vendor-specific pages (0xFF00+) often don't produce input reports.
+            let dominated = entry.hid_usage.as_ref().is_some_and(|u| u.usage_page == 0x01)
+                && usage.usage_page != 0x01;
+            if !dominated {
+                entry.hid_path = Some(hid_path);
+            }
             entry.hid_usage = Some(usage);
 
             // If it already existed as Serial, upgrade to Both.

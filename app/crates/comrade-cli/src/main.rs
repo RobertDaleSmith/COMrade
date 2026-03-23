@@ -1,3 +1,4 @@
+mod mcp;
 mod tui;
 
 use std::io::{self, Write};
@@ -46,6 +47,10 @@ struct Cli {
     /// Raw output mode (no TUI, print directly to stdout)
     #[arg(long)]
     raw: bool,
+
+    /// Start as a stdio MCP server for Claude Code integration
+    #[arg(long)]
+    mcp: bool,
 
     /// Enable verbose logging
     #[arg(short, long)]
@@ -109,6 +114,14 @@ fn main() -> Result<()> {
         return list_ports();
     }
 
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+
+    if cli.mcp {
+        return rt.block_on(mcp::run_mcp());
+    }
+
     let port = match &cli.port {
         Some(p) => p.clone(),
         None => {
@@ -118,10 +131,6 @@ fn main() -> Result<()> {
     };
 
     let config = cli.serial_config()?;
-
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
 
     if cli.raw {
         rt.block_on(run_raw(port, config))

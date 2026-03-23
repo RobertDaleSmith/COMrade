@@ -523,8 +523,8 @@ body {
   align-items: center;
   background: var(--bg-surface);
   border-bottom: 1px solid var(--border);
-  padding: 0 8px;
-  gap: 2px;
+  padding: 0 2px;
+  gap: 1px;
   flex-shrink: 0;
   overflow-x: auto;
   min-height: 32px;
@@ -620,12 +620,21 @@ body {
 }
 
 #toolbar-status {
+  display: flex;
+  align-items: center;
+}
+
+.tab-status-bar {
   font-family: var(--font-ui);
   display: flex;
   align-items: center;
   gap: 16px;
   font-size: 12px;
   color: var(--fg-secondary);
+}
+
+.tab-status-bar.hidden {
+  display: none;
 }
 
 #toolbar-actions {
@@ -644,6 +653,14 @@ body {
   font-size: 12px;
   cursor: pointer;
   transition: background 0.15s, color 0.15s, border-color 0.15s;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  vertical-align: middle;
+}
+
+#toolbar-actions button svg {
+  display: block;
 }
 
 #toolbar-actions button:hover {
@@ -706,27 +723,27 @@ body {
   box-shadow: 0 0 8px rgba(215, 38, 38, 0.3) !important;
 }
 
-#status-rx {
+.status-rx {
   cursor: pointer;
 }
 
-#status-rx:hover {
+.status-rx:hover {
   color: var(--fg-primary);
 }
 
-#status-state {
+.status-state {
   font-weight: bold;
 }
 
-#status-state.connected {
+.status-state.connected {
   color: var(--accent-red);
 }
 
-#status-state.connecting {
+.status-state.connecting {
   color: var(--accent-orange);
 }
 
-#status-state.disconnected {
+.status-state.disconnected {
   color: var(--fg-secondary);
 }
 
@@ -758,6 +775,10 @@ body {
   background: var(--bg-panel);
   border-top: 1px solid var(--border);
   flex-shrink: 0;
+}
+
+#input-bar.hidden {
+  display: none;
 }
 
 #input-bar .prompt {

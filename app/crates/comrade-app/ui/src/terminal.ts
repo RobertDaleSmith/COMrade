@@ -21,10 +21,12 @@ export interface HidReport {
 /** Manages the terminal output display. */
 export class TerminalUI {
   private output: HTMLElement;
+  private statusBar: HTMLElement;
   private statusPort: HTMLElement;
   private statusConfig: HTMLElement;
   private statusState: HTMLElement;
   private statusRx: HTMLElement;
+  private activityLed: HTMLElement;
   private autoScroll = true;
   private maxLines = 10000;
   private timestampsVisible = true;
@@ -35,7 +37,6 @@ export class TerminalUI {
   private lastHidReport: HidReport | null = null;
   private contextMenu: HTMLElement;
   private contextTarget: HTMLElement | null = null;
-  private activityLed: HTMLElement;
   private activityTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Timestamp formatting.
@@ -49,16 +50,49 @@ export class TerminalUI {
   private searchActive = false;
 
   constructor() {
+    // Create per-tab status bar.
+    this.statusBar = document.createElement("div");
+    this.statusBar.className = "tab-status-bar hidden";
+
+    this.statusPort = document.createElement("span");
+    this.statusPort.className = "status-port";
+
+    this.statusConfig = document.createElement("span");
+    this.statusConfig.className = "status-config";
+
+    this.statusState = document.createElement("span");
+    this.statusState.className = "status-state";
+    this.statusState.textContent = "CONNECTING";
+
+    this.statusRx = document.createElement("span");
+    this.statusRx.className = "status-rx";
+    this.statusRx.textContent = "RX: 0";
+
+    this.activityLed = document.createElement("span");
+    this.activityLed.className = "activity-led";
+
+    this.statusBar.appendChild(this.statusPort);
+    this.statusBar.appendChild(this.statusConfig);
+    this.statusBar.appendChild(this.statusState);
+    this.statusBar.appendChild(this.statusRx);
+    this.statusBar.appendChild(this.activityLed);
+
+    // Timestamp format cycle on RX counter click.
+    this.statusRx.addEventListener("click", () => {
+      const fmt = this.cycleTimestampFormat();
+      const label: Record<string, string> = { time: "Time", elapsed: "Elapsed", iso: "ISO" };
+      this.appendLine({
+        timestamp: new Date().toLocaleTimeString("en-GB", { hour12: false }) + "." + new Date().getMilliseconds().toString().padStart(3, "0"),
+        text: `Timestamp format: ${label[fmt] ?? fmt}`,
+        kind: "system",
+        rx_bytes_total: 0,
+      });
+    });
+
     // Create a dedicated output container for this tab (hidden until activated).
     this.output = document.createElement("div");
     this.output.className = "output hidden";
     document.getElementById("terminal-body")!.appendChild(this.output);
-
-    this.statusPort = document.getElementById("status-port")!;
-    this.statusConfig = document.getElementById("status-config")!;
-    this.statusState = document.getElementById("status-state")!;
-    this.statusRx = document.getElementById("status-rx")!;
-    this.activityLed = document.getElementById("activity-led")!;
 
     // Track scroll position for auto-scroll.
     this.output.addEventListener("scroll", () => {
@@ -520,19 +554,27 @@ export class TerminalUI {
     this.output.classList.toggle("hide-timestamps", !visible);
   }
 
-  /** Show this tab's output container. */
+  /** Show this tab's output and mount status bar. */
   show(): void {
     this.output.classList.remove("hidden");
+    const statusContainer = document.getElementById("toolbar-status");
+    if (statusContainer) {
+      statusContainer.appendChild(this.statusBar);
+      this.statusBar.classList.remove("hidden");
+    }
   }
 
-  /** Hide this tab's output container. */
+  /** Hide this tab's output and unmount status bar. */
   hide(): void {
     this.output.classList.add("hidden");
+    this.statusBar.classList.add("hidden");
+    this.statusBar.remove();
   }
 
-  /** Remove this tab's output container from the DOM. */
+  /** Remove this tab's elements from the DOM. */
   destroy(): void {
     this.output.remove();
+    this.statusBar.remove();
     this.contextMenu.remove();
   }
 

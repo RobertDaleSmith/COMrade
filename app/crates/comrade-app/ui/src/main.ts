@@ -45,6 +45,7 @@ interface Tab {
   reconnectCtx: ReconnectCtx | null;
   reconnectTimer: ReturnType<typeof setTimeout> | null;
   reconnectDelay: number;
+  reconnectAttempts: number;
   lineChannel: Channel<SerialLine> | null;
   reportChannel: Channel<HidReport> | null;
   history: string[];
@@ -52,6 +53,7 @@ interface Tab {
   savedInput: string;
   dtrState: boolean;
   rtsState: boolean;
+  draftInput: string;
   tabBtn: HTMLElement;
 }
 
@@ -72,7 +74,7 @@ const refreshBtn = document.getElementById("refresh-btn")!;
 const inputEl = document.getElementById("input") as HTMLInputElement;
 const copyBtn = document.getElementById("copy-btn")!;
 const clearBtn = document.getElementById("clear-btn")!;
-const disconnectBtn = document.getElementById("disconnect-btn");
+const disconnectBtn = document.getElementById("disconnect-btn")!;
 const descriptorBtn = document.getElementById("descriptor-btn")!;
 const searchBtn = document.getElementById("search-btn")!;
 const searchBar = document.getElementById("search-bar")!;
@@ -176,6 +178,7 @@ function createTab(label: string, tooltip?: string, kind: TabKind = "serial"): T
     reconnectCtx: null,
     reconnectTimer: null,
     reconnectDelay: 2000,
+    reconnectAttempts: 0,
     lineChannel: null,
     reportChannel: null,
     history: [],
@@ -183,6 +186,7 @@ function createTab(label: string, tooltip?: string, kind: TabKind = "serial"): T
     savedInput: "",
     dtrState: true,
     rtsState: false,
+    draftInput: "",
     tabBtn,
   };
 
@@ -197,9 +201,10 @@ function switchTab(tabId: string): void {
   // Hide inline device selector if showing.
   hideInlineDeviceSelector();
 
-  // Hide current tab's terminal.
+  // Save current tab's input text.
   const current = activeTab();
   if (current) {
+    current.draftInput = inputEl.value;
     current.terminal.hide();
     current.tabBtn.classList.remove("active");
   }
@@ -207,6 +212,9 @@ function switchTab(tabId: string): void {
   activeTabId = tabId;
   tab.terminal.show();
   tab.tabBtn.classList.add("active");
+
+  // Restore this tab's input text.
+  inputEl.value = tab.draftInput;
 
   // Update toolbar to reflect this tab's state.
   updateToolbar(tab);
@@ -451,9 +459,10 @@ function showTerminalView(tab: Tab): void {
   switchTab(tab.id);
 }
 
-/** Find an existing tab already connected to this device. */
+/** Find an existing tab actively connected to this device. */
 function findExistingTab(type: string, id: string, vid?: number, pid?: number): Tab | undefined {
   for (const tab of tabs.values()) {
+    if (!tab.connected) continue;
     const ctx = tab.reconnectCtx;
     if (!ctx) continue;
     if (type === "serial" && ctx.type === "serial" && ctx.port === id) return tab;
@@ -620,16 +629,28 @@ function markConnected(tab: Tab): void {
   tab.connected = true;
   tab.wasConnected = true;
   tab.reconnectDelay = 2000;
+  tab.reconnectAttempts = 0;
 }
 
 // ---- Reconnect ----
+
+const MAX_RECONNECT_ATTEMPTS = 50;
 
 function scheduleReconnect(tab: Tab): void {
   if (tab.userDisconnected || !tab.reconnectCtx) return;
   stopReconnect(tab);
 
+  tab.reconnectAttempts++;
+  if (tab.reconnectAttempts > MAX_RECONNECT_ATTEMPTS) {
+    tab.terminal.setDisconnected("max reconnect attempts reached");
+    return;
+  }
+
   const delay = tab.reconnectDelay;
-  tab.terminal.setReconnecting();
+  // Only show "RECONNECTING" on first attempt to avoid DOM spam.
+  if (tab.reconnectAttempts === 1) {
+    tab.terminal.setReconnecting();
+  }
 
   tab.reconnectTimer = setTimeout(async () => {
     tab.reconnectTimer = null;
@@ -765,8 +786,13 @@ function showPortSelect(): void {
 const terminalBody = document.getElementById("terminal-body")!;
 const portSelectParent = portSelectEl.parentElement!;
 
-/** Show device selector inline within terminal-body (tabs stay visible). */
+let newTabPlaceholder: HTMLElement | null = null;
+
+/** Show device selector inline within terminal-body as a "New" tab. */
 function showInlineDeviceSelector(): void {
+  // If already showing, just focus it.
+  if (newTabPlaceholder) return;
+
   // Hide active tab output.
   const current = activeTab();
   if (current) {
@@ -775,22 +801,53 @@ function showInlineDeviceSelector(): void {
   }
   activeTabId = null;
 
-  // Move port-select into terminal-body.
+  // Create a placeholder "New" tab button.
+  newTabPlaceholder = document.createElement("div");
+  newTabPlaceholder.className = "tab-btn active";
+  const placeholderLabel = document.createElement("span");
+  placeholderLabel.className = "tab-label";
+  placeholderLabel.textContent = "New";
+  const placeholderClose = document.createElement("span");
+  placeholderClose.className = "tab-close";
+  placeholderClose.textContent = "\u00d7";
+  placeholderClose.addEventListener("click", (e) => {
+    e.stopPropagation();
+    hideInlineDeviceSelector();
+    // Switch to last real tab or show full-screen selector.
+    const remaining = Array.from(tabs.keys());
+    if (remaining.length > 0) {
+      switchTab(remaining[remaining.length - 1]);
+    } else {
+      showPortSelect();
+    }
+  });
+  newTabPlaceholder.appendChild(placeholderLabel);
+  newTabPlaceholder.appendChild(placeholderClose);
+  tabBar.insertBefore(newTabPlaceholder, newTabBtn);
+
+  // Move port-select into terminal-body and hide input bar.
   portSelectEl.classList.add("inline");
   terminalBody.appendChild(portSelectEl);
   portSelectEl.classList.remove("hidden");
+  document.getElementById("input-bar")!.classList.add("hidden");
 
   lastDeviceListJson = "";
   refreshDevices();
   startDeviceListPolling();
 }
 
-/** Move port-select back to its original position outside terminal. */
+/** Move port-select back and remove placeholder tab. */
 function hideInlineDeviceSelector(): void {
   portSelectEl.classList.remove("inline");
   portSelectEl.classList.add("hidden");
   portSelectParent.appendChild(portSelectEl);
   stopDeviceListPolling();
+  document.getElementById("input-bar")!.classList.remove("hidden");
+
+  if (newTabPlaceholder) {
+    newTabPlaceholder.remove();
+    newTabPlaceholder = null;
+  }
 }
 
 newTabBtn.addEventListener("click", () => {
@@ -997,10 +1054,27 @@ document.addEventListener("keydown", (e: KeyboardEvent) => {
   const tab = activeTab();
   if ((e.metaKey || e.ctrlKey) && e.key === "w") {
     e.preventDefault();
+    // Close the "New" placeholder tab if it's open.
+    if (newTabPlaceholder) {
+      hideInlineDeviceSelector();
+      const remaining = Array.from(tabs.keys());
+      if (remaining.length > 0) {
+        switchTab(remaining[remaining.length - 1]);
+      } else {
+        showPortSelect();
+      }
+      return;
+    }
     if (tab) {
       tab.userDisconnected = true;
       stopReconnect(tab);
       closeTab(tab.id);
+    }
+    // Close app if no tabs remain.
+    if (tabs.size === 0) {
+      import("@tauri-apps/api/window").then(({ getCurrentWindow }) => {
+        getCurrentWindow().close();
+      });
     }
     return;
   }
@@ -1098,7 +1172,7 @@ async function toggleAutoLog(): Promise<void> {
       const result = await invoke<[string, number] | null>("stop_auto_log");
       autoLogActive = false;
       autologBtn.classList.remove("active");
-      autologBtn.textContent = "Log";
+      autologBtn.classList.remove("active");
       if (result) {
         tab?.terminal.appendLine({
           timestamp: makeTimestamp(),
@@ -1121,7 +1195,7 @@ async function toggleAutoLog(): Promise<void> {
       const path = await invoke<string>("start_auto_log", { directory: dir });
       autoLogActive = true;
       autologBtn.classList.add("active");
-      autologBtn.textContent = "Log \u25cf";
+      autologBtn.classList.add("active");
       tab?.terminal.appendLine({
         timestamp: makeTimestamp(),
         text: `Auto-logging to ${path}`,
@@ -1204,25 +1278,12 @@ breakBtn.addEventListener("click", async () => {
   }
 });
 
-// Timestamp format cycle.
-document.getElementById("status-rx")!.addEventListener("click", () => {
-  const tab = activeTab();
-  if (!tab) return;
-  const fmt = tab.terminal.cycleTimestampFormat();
-  const label: Record<string, string> = { time: "Time", elapsed: "Elapsed", iso: "ISO" };
-  tab.terminal.appendLine({
-    timestamp: makeTimestamp(),
-    text: `Timestamp format: ${label[fmt] ?? fmt}`,
-    kind: "system",
-    rx_bytes_total: 0,
-  });
-});
 
 refreshBtn.addEventListener("click", refreshDevices);
 exportBtn?.addEventListener("click", exportLog);
 copyBtn.addEventListener("click", copyLog);
 clearBtn.addEventListener("click", () => activeTab()?.terminal.clear());
-disconnectBtn?.addEventListener("click", disconnect);
+disconnectBtn.addEventListener("click", disconnect);
 descriptorBtn.addEventListener("click", toggleDescriptor);
 
 // ---- Menu events ----
@@ -1242,6 +1303,10 @@ let showTimestamps = true;
   } else {
     showPortSelect();
   }
+};
+
+(window as any).__mcpCloseTab = (tabId: string) => {
+  closeTab(tabId);
 };
 
 (window as any).__mcpConnect = (type: string, path: string, baud: number, name: string) => {

@@ -72,6 +72,12 @@ pub struct ConnectDeviceParams {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct DisconnectDeviceParams {
+    #[schemars(description = "Tab ID of the connection to disconnect. The tab and its logs are preserved.")]
+    pub tab_id: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct ClearLogsParams {
     #[schemars(description = "Tab ID to clear. If omitted, clears all tabs.")]
     pub tab_id: Option<String>,
@@ -240,11 +246,13 @@ impl ComradeMcp {
         &self,
         Parameters(params): Parameters<ConnectDeviceParams>,
     ) -> Result<CallToolResult, McpError> {
-        // Check if already connected to this device.
+        // Check if already connected to this device (skip disconnected tabs).
         let app = self.shared_state.lock().await;
         for (id, tab) in &app.tabs {
             let status = tab.status_tracker.snapshot();
-            if status.device_path.as_deref() == Some(&params.path) {
+            if status.state != "disconnected"
+                && status.device_path.as_deref() == Some(&params.path)
+            {
                 return Ok(CallToolResult::success(vec![Content::text(format!(
                     "Already connected in tab {id}"
                 ))]));
@@ -312,6 +320,32 @@ impl ComradeMcp {
         Ok(CallToolResult::success(vec![Content::text(
             "Connection initiated. Use get_status to check progress."
         )]))
+    }
+
+    #[tool(description = "Disconnect a device and close its tab, releasing the port. Use connect_device to open a fresh connection later.")]
+    async fn disconnect_device(
+        &self,
+        Parameters(params): Parameters<DisconnectDeviceParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let mut app = self.shared_state.lock().await;
+        if let Some(mut tab) = app.tabs.remove(&params.tab_id) {
+            crate::commands::shutdown_connection(&mut tab.connection).await;
+        }
+
+        // Tell frontend to close the tab too.
+        if let Some(ref handle) = app.app_handle {
+            if let Some(window) = handle.get_webview_window("main") {
+                let _ = window.eval(format!(
+                    "window.__mcpCloseTab && window.__mcpCloseTab('{}')",
+                    params.tab_id
+                ));
+            }
+        }
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Disconnected and closed tab {}. Port released.",
+            params.tab_id
+        ))]))
     }
 
     #[tool(description = "Clear log entries. Optionally specify tab_id.")]
