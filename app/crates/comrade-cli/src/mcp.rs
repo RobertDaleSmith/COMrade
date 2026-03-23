@@ -1,9 +1,17 @@
 //! MCP server for Claude Code integration.
 //!
-//! `comrade --mcp` starts as a stdio MCP server. If the COMrade GUI is
-//! running, it bridges to the GUI's HTTP MCP server on port 9712 so
-//! Claude can interact with the app's live tabs. If the GUI is not
-//! running, it operates standalone with its own serial Engine.
+//! `comrade --mcp` operates in one of two modes:
+//!
+//! 1. **Bridge** — GUI is running on port 9712. The CLI proxies stdio
+//!    JSON-RPC to the GUI's HTTP MCP server. Claude interacts with the
+//!    app's live tabs.
+//!
+//! 2. **Headless** — GUI is not running. The CLI starts its own serial
+//!    Engine AND an HTTP MCP server on port 9712. The GUI can open later
+//!    and connect to the CLI's MCP server to view the same data.
+//!
+//! Either way, port 9712 is the shared MCP endpoint. Whoever starts
+//! first owns the serial connection and serves MCP. The other connects.
 
 use std::collections::VecDeque;
 use std::io::{self, BufRead, Write};
@@ -13,12 +21,34 @@ use anyhow::Result;
 use chrono::Local;
 use comrade_core::{enumerate_devices, Engine};
 use comrade_protocol::{Command, Event, SerialConfig};
+use rmcp::handler::server::router::tool::ToolRouter;
+use rmcp::handler::server::wrapper::Parameters;
+use rmcp::model::*;
+use rmcp::transport::streamable_http_server::{
+    session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
+};
+use rmcp::{schemars, tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler};
 use tokio::sync::Mutex;
+use tracing::{info, warn};
 
 const MCP_URL: &str = "http://127.0.0.1:9712/mcp";
+const MCP_PORT: &str = "127.0.0.1:9712";
 
-/// Check if the GUI MCP server is reachable.
-async fn is_gui_running() -> bool {
+// ═══════════════════════════════════════════════════════════════════════
+// Entry point
+// ═══════════════════════════════════════════════════════════════════════
+
+pub async fn run_mcp() -> Result<()> {
+    if is_mcp_reachable().await {
+        eprintln!("COMrade detected on port 9712, bridging...");
+        run_bridge().await
+    } else {
+        eprintln!("Starting COMrade headless MCP server on port 9712...");
+        run_headless().await
+    }
+}
+
+async fn is_mcp_reachable() -> bool {
     reqwest::Client::new()
         .post(MCP_URL)
         .header("Content-Type", "application/json")
@@ -29,18 +59,8 @@ async fn is_gui_running() -> bool {
         .is_ok()
 }
 
-pub async fn run_mcp() -> Result<()> {
-    if is_gui_running().await {
-        eprintln!("COMrade GUI detected, bridging to app...");
-        run_bridge().await
-    } else {
-        eprintln!("COMrade running headless (standalone MCP server)");
-        run_standalone().await
-    }
-}
-
 // ═══════════════════════════════════════════════════════════════════════
-// Bridge mode — proxy stdio JSON-RPC to the GUI's HTTP MCP server
+// Bridge mode — proxy stdio to running GUI/CLI MCP server
 // ═══════════════════════════════════════════════════════════════════════
 
 async fn run_bridge() -> Result<()> {
@@ -88,7 +108,7 @@ async fn run_bridge() -> Result<()> {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// Standalone mode — headless MCP server with its own Engine
+// Headless mode — own Engine + HTTP MCP server + stdio proxy
 // ═══════════════════════════════════════════════════════════════════════
 
 const MAX_LOG: usize = 10_000;
@@ -106,7 +126,7 @@ impl LogEntry {
     }
 }
 
-struct ConnState {
+pub(crate) struct ConnState {
     engine: Option<Engine>,
     port: Option<String>,
     baud: Option<u32>,
@@ -115,257 +135,10 @@ struct ConnState {
     log: VecDeque<LogEntry>,
 }
 
-type State = Arc<Mutex<ConnState>>;
+type SharedState = Arc<Mutex<ConnState>>;
 
 fn now() -> String {
     Local::now().format("%H:%M:%S%.3f").to_string()
-}
-
-/// Minimal JSON-RPC dispatcher — no framework dependency, just parse and route.
-async fn run_standalone() -> Result<()> {
-    let state: State = Arc::new(Mutex::new(ConnState {
-        engine: None,
-        port: None,
-        baud: None,
-        connected: false,
-        rx_bytes: 0,
-        log: VecDeque::with_capacity(MAX_LOG),
-    }));
-
-    let stdin = io::stdin();
-    let mut stdout = io::stdout();
-
-    for line in stdin.lock().lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => break,
-        };
-        if line.trim().is_empty() {
-            continue;
-        }
-
-        let req: serde_json::Value = match serde_json::from_str(&line) {
-            Ok(v) => v,
-            Err(e) => {
-                let err = json_rpc_error(None, -32700, &format!("Parse error: {e}"));
-                writeln!(stdout, "{err}")?;
-                stdout.flush()?;
-                continue;
-            }
-        };
-
-        let id = req.get("id").cloned();
-        let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
-        let params = req.get("params").cloned().unwrap_or(serde_json::json!({}));
-
-        let result = match method {
-            "initialize" => handle_initialize(),
-            "notifications/initialized" | "initialized" => continue, // no response
-            "tools/list" => handle_tools_list(),
-            "tools/call" => handle_tool_call(&params, &state).await,
-            _ => Err(format!("Unknown method: {method}")),
-        };
-
-        if let Some(id) = id {
-            let resp = match result {
-                Ok(val) => serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": val }),
-                Err(msg) => json_rpc_error(Some(id), -32603, &msg),
-            };
-            writeln!(stdout, "{resp}")?;
-            stdout.flush()?;
-        }
-    }
-    Ok(())
-}
-
-fn json_rpc_error(id: Option<serde_json::Value>, code: i32, msg: &str) -> serde_json::Value {
-    serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "error": { "code": code, "message": msg }
-    })
-}
-
-fn handle_initialize() -> Result<serde_json::Value, String> {
-    Ok(serde_json::json!({
-        "protocolVersion": "2025-03-26",
-        "capabilities": { "tools": {} },
-        "serverInfo": { "name": "comrade", "version": env!("CARGO_PKG_VERSION") },
-        "instructions": "COMrade serial monitor (headless). Tools: list_devices, connect, disconnect, get_status, get_logs, search_logs, send_serial, clear_logs."
-    }))
-}
-
-fn handle_tools_list() -> Result<serde_json::Value, String> {
-    Ok(serde_json::json!({
-        "tools": [
-            { "name": "list_devices", "description": "List available serial and HID devices.", "inputSchema": { "type": "object", "properties": {} } },
-            { "name": "connect", "description": "Connect to a serial device.", "inputSchema": { "type": "object", "properties": { "port": { "type": "string", "description": "Serial port path" }, "baud": { "type": "integer", "description": "Baud rate (default 115200)" } }, "required": ["port"] } },
-            { "name": "disconnect", "description": "Disconnect from the current device.", "inputSchema": { "type": "object", "properties": {} } },
-            { "name": "get_status", "description": "Get connection status.", "inputSchema": { "type": "object", "properties": {} } },
-            { "name": "get_logs", "description": "Get recent log entries.", "inputSchema": { "type": "object", "properties": { "count": { "type": "integer", "description": "Number of entries (default 100)" }, "since": { "type": "string", "description": "Timestamp to filter from" } } } },
-            { "name": "search_logs", "description": "Search logs by regex or substring.", "inputSchema": { "type": "object", "properties": { "pattern": { "type": "string" }, "max_results": { "type": "integer" } }, "required": ["pattern"] } },
-            { "name": "send_serial", "description": "Send text to serial device (newline appended).", "inputSchema": { "type": "object", "properties": { "text": { "type": "string" } }, "required": ["text"] } },
-            { "name": "clear_logs", "description": "Clear all log entries.", "inputSchema": { "type": "object", "properties": {} } }
-        ]
-    }))
-}
-
-async fn handle_tool_call(params: &serde_json::Value, state: &State) -> Result<serde_json::Value, String> {
-    let name = params.get("name").and_then(|n| n.as_str()).unwrap_or("");
-    let args = params.get("arguments").cloned().unwrap_or(serde_json::json!({}));
-
-    let text = match name {
-        "list_devices" => tool_list_devices()?,
-        "connect" => tool_connect(&args, state).await?,
-        "disconnect" => tool_disconnect(state).await?,
-        "get_status" => tool_get_status(state).await?,
-        "get_logs" => tool_get_logs(&args, state).await?,
-        "search_logs" => tool_search_logs(&args, state).await?,
-        "send_serial" => tool_send_serial(&args, state).await?,
-        "clear_logs" => tool_clear_logs(state).await?,
-        _ => return Err(format!("Unknown tool: {name}")),
-    };
-
-    Ok(serde_json::json!({
-        "content": [{ "type": "text", "text": text }]
-    }))
-}
-
-fn tool_list_devices() -> Result<String, String> {
-    let devices = enumerate_devices().map_err(|e| e.to_string())?;
-    let filtered: Vec<_> = devices
-        .into_iter()
-        .filter(|d| {
-            if let Some(ref sp) = d.serial_path {
-                if sp == "/dev/cu.debug-console" || sp == "/dev/cu.Bluetooth-Incoming-Port" {
-                    return false;
-                }
-            }
-            if d.kind == comrade_protocol::DeviceKind::Hid && d.vid == Some(0x05AC) {
-                return false;
-            }
-            true
-        })
-        .collect();
-    serde_json::to_string_pretty(&filtered).map_err(|e| e.to_string())
-}
-
-async fn tool_connect(args: &serde_json::Value, state: &State) -> Result<String, String> {
-    let port = args.get("port").and_then(|p| p.as_str()).ok_or("Missing 'port'")?;
-    let baud = args.get("baud").and_then(|b| b.as_u64()).unwrap_or(115200) as u32;
-
-    let mut s = state.lock().await;
-
-    // Disconnect existing.
-    if let Some(ref engine) = s.engine {
-        let _ = engine.send(Command::Shutdown).await;
-    }
-    s.engine = None;
-    s.connected = false;
-    s.rx_bytes = 0;
-
-    let config = SerialConfig {
-        baud_rate: baud,
-        ..SerialConfig::default()
-    };
-
-    let engine = Engine::spawn();
-    engine
-        .send(Command::Connect { port: port.to_string(), config })
-        .await
-        .map_err(|e| e.to_string())?;
-
-    s.port = Some(port.to_string());
-    s.baud = Some(baud);
-    s.engine = Some(engine);
-
-    let state_clone = state.clone();
-    tokio::spawn(async move { drain_events(state_clone).await });
-
-    Ok(format!("Connected to {port} at {baud} baud"))
-}
-
-async fn tool_disconnect(state: &State) -> Result<String, String> {
-    let mut s = state.lock().await;
-    if let Some(ref engine) = s.engine {
-        let _ = engine.send(Command::Shutdown).await;
-    }
-    s.engine = None;
-    s.connected = false;
-    let port = s.port.take().unwrap_or_default();
-    Ok(format!("Disconnected from {port}"))
-}
-
-async fn tool_get_status(state: &State) -> Result<String, String> {
-    let s = state.lock().await;
-    let status = serde_json::json!({
-        "connected": s.connected,
-        "port": s.port,
-        "baud": s.baud,
-        "rx_bytes": s.rx_bytes,
-    });
-    serde_json::to_string_pretty(&status).map_err(|e| e.to_string())
-}
-
-async fn tool_get_logs(args: &serde_json::Value, state: &State) -> Result<String, String> {
-    let s = state.lock().await;
-    let entries: Vec<&LogEntry> = if let Some(since) = args.get("since").and_then(|s| s.as_str()) {
-        s.log.iter().filter(|e| e.timestamp.as_str() > since).collect()
-    } else {
-        let count = args.get("count").and_then(|c| c.as_u64()).unwrap_or(100) as usize;
-        let skip = s.log.len().saturating_sub(count.min(5000));
-        s.log.iter().skip(skip).collect()
-    };
-
-    if entries.is_empty() {
-        return Ok("No log entries.".to_string());
-    }
-    Ok(entries.iter().map(|e| e.format()).collect::<Vec<_>>().join("\n"))
-}
-
-async fn tool_search_logs(args: &serde_json::Value, state: &State) -> Result<String, String> {
-    let pattern = args.get("pattern").and_then(|p| p.as_str()).ok_or("Missing 'pattern'")?;
-    let max = args.get("max_results").and_then(|m| m.as_u64()).unwrap_or(100) as usize;
-
-    let s = state.lock().await;
-    let re = regex::Regex::new(pattern).ok();
-    let entries: Vec<&LogEntry> = s.log
-        .iter()
-        .filter(|e| match &re {
-            Some(re) => re.is_match(&e.text),
-            None => e.text.contains(pattern),
-        })
-        .rev()
-        .take(max)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
-
-    if entries.is_empty() {
-        return Ok(format!("No matches for '{pattern}'."));
-    }
-    Ok(format!("{} match(es):\n{}", entries.len(),
-        entries.iter().map(|e| e.format()).collect::<Vec<_>>().join("\n")))
-}
-
-async fn tool_send_serial(args: &serde_json::Value, state: &State) -> Result<String, String> {
-    let text = args.get("text").and_then(|t| t.as_str()).ok_or("Missing 'text'")?;
-    let mut s = state.lock().await;
-    let sender = s.engine.as_ref().map(|e| e.cmd_sender()).ok_or("Not connected")?;
-
-    push_log(&mut s.log, "sent", text);
-    drop(s);
-
-    let mut data = text.as_bytes().to_vec();
-    data.push(b'\n');
-    sender.send(Command::Send { data }).await.map_err(|e| e.to_string())?;
-    Ok("Sent.".to_string())
-}
-
-async fn tool_clear_logs(state: &State) -> Result<String, String> {
-    state.lock().await.log.clear();
-    Ok("Logs cleared.".to_string())
 }
 
 fn push_log(log: &mut VecDeque<LogEntry>, kind: &str, text: &str) {
@@ -379,7 +152,320 @@ fn push_log(log: &mut VecDeque<LogEntry>, kind: &str, text: &str) {
     });
 }
 
-async fn drain_events(state: State) {
+async fn run_headless() -> Result<()> {
+    let state: SharedState = Arc::new(Mutex::new(ConnState {
+        engine: None,
+        port: None,
+        baud: None,
+        connected: false,
+        rx_bytes: 0,
+        log: VecDeque::with_capacity(MAX_LOG),
+    }));
+
+    // Start HTTP MCP server on port 9712 in background.
+    let http_state = state.clone();
+    tokio::spawn(async move {
+        start_http_mcp(http_state).await;
+    });
+
+    // Run stdio proxy to our own HTTP server (so Claude gets stdio transport).
+    // Wait for our HTTP server to be ready.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    run_bridge().await
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// HTTP MCP server (shared between headless CLI and GUI)
+// ═══════════════════════════════════════════════════════════════════════
+
+#[derive(Clone)]
+struct HeadlessMcp {
+    state: SharedState,
+    tool_router: ToolRouter<Self>,
+}
+
+// ── Parameter structs ────────────────────────────────────────────────
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct ConnectParams {
+    #[schemars(description = "Serial port path (e.g. /dev/cu.usbmodem101)")]
+    port: String,
+    #[schemars(description = "Baud rate (default 115200)")]
+    baud: Option<u32>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct GetLogsParams {
+    #[schemars(description = "Number of recent entries (default 100, max 5000)")]
+    count: Option<usize>,
+    #[schemars(description = "Only return entries after this timestamp")]
+    since: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct SearchLogsParams {
+    #[schemars(description = "Regex or substring to search")]
+    pattern: String,
+    #[schemars(description = "Max results (default 100)")]
+    max_results: Option<usize>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct SendParams {
+    #[schemars(description = "Text to send (newline appended automatically)")]
+    text: String,
+}
+
+#[tool_router]
+impl HeadlessMcp {
+    fn new(state: SharedState) -> Self {
+        Self {
+            state,
+            tool_router: Self::tool_router(),
+        }
+    }
+
+    #[tool(description = "List available serial and HID devices.")]
+    fn list_devices(&self) -> Result<CallToolResult, McpError> {
+        let devices = enumerate_devices()
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let filtered: Vec<_> = devices
+            .into_iter()
+            .filter(|d| {
+                if let Some(ref sp) = d.serial_path {
+                    if sp == "/dev/cu.debug-console"
+                        || sp == "/dev/cu.Bluetooth-Incoming-Port"
+                    {
+                        return false;
+                    }
+                }
+                if d.kind == comrade_protocol::DeviceKind::Hid && d.vid == Some(0x05AC) {
+                    return false;
+                }
+                true
+            })
+            .collect();
+        let json = serde_json::to_string_pretty(&filtered).unwrap_or_default();
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "Connect to a serial device. Disconnects any existing connection first.")]
+    async fn connect(
+        &self,
+        Parameters(params): Parameters<ConnectParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let mut s = self.state.lock().await;
+
+        if let Some(ref engine) = s.engine {
+            let _ = engine.send(Command::Shutdown).await;
+        }
+        s.engine = None;
+        s.connected = false;
+        s.rx_bytes = 0;
+
+        let baud = params.baud.unwrap_or(115200);
+        let config = SerialConfig {
+            baud_rate: baud,
+            ..SerialConfig::default()
+        };
+
+        let engine = Engine::spawn();
+        engine
+            .send(Command::Connect {
+                port: params.port.clone(),
+                config,
+            })
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        s.port = Some(params.port.clone());
+        s.baud = Some(baud);
+        s.engine = Some(engine);
+
+        let state_clone = self.state.clone();
+        tokio::spawn(async move {
+            drain_events(state_clone).await;
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Connected to {} at {} baud",
+            params.port, baud
+        ))]))
+    }
+
+    #[tool(description = "Disconnect from the current device, releasing the port.")]
+    async fn disconnect(&self) -> Result<CallToolResult, McpError> {
+        let mut s = self.state.lock().await;
+        if let Some(ref engine) = s.engine {
+            let _ = engine.send(Command::Shutdown).await;
+        }
+        s.engine = None;
+        s.connected = false;
+        let port = s.port.take().unwrap_or_default();
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Disconnected from {port}"
+        ))]))
+    }
+
+    #[tool(description = "Get connection status.")]
+    async fn get_status(&self) -> Result<CallToolResult, McpError> {
+        let s = self.state.lock().await;
+        let json = serde_json::json!({
+            "connected": s.connected,
+            "port": s.port,
+            "baud": s.baud,
+            "rx_bytes": s.rx_bytes,
+        });
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&json).unwrap_or_default(),
+        )]))
+    }
+
+    #[tool(description = "Get recent log entries from the connected device.")]
+    async fn get_logs(
+        &self,
+        Parameters(params): Parameters<GetLogsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let s = self.state.lock().await;
+        let entries: Vec<&LogEntry> =
+            if let Some(ref since) = params.since {
+                s.log.iter().filter(|e| e.timestamp.as_str() > since.as_str()).collect()
+            } else {
+                let count = params.count.unwrap_or(100).min(5000);
+                let skip = s.log.len().saturating_sub(count);
+                s.log.iter().skip(skip).collect()
+            };
+
+        if entries.is_empty() {
+            return Ok(CallToolResult::success(vec![Content::text(
+                "No log entries.",
+            )]));
+        }
+        let text = entries.iter().map(|e| e.format()).collect::<Vec<_>>().join("\n");
+        Ok(CallToolResult::success(vec![Content::text(text)]))
+    }
+
+    #[tool(description = "Search log entries by regex or substring.")]
+    async fn search_logs(
+        &self,
+        Parameters(params): Parameters<SearchLogsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let s = self.state.lock().await;
+        let max = params.max_results.unwrap_or(100).min(5000);
+        let re = regex::Regex::new(&params.pattern).ok();
+        let entries: Vec<&LogEntry> = s
+            .log
+            .iter()
+            .filter(|e| match &re {
+                Some(re) => re.is_match(&e.text),
+                None => e.text.contains(&params.pattern),
+            })
+            .rev()
+            .take(max)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+
+        if entries.is_empty() {
+            return Ok(CallToolResult::success(vec![Content::text(format!(
+                "No matches for '{}'.",
+                params.pattern
+            ))]));
+        }
+        let text = entries.iter().map(|e| e.format()).collect::<Vec<_>>().join("\n");
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "{} match(es):\n{}",
+            entries.len(),
+            text
+        ))]))
+    }
+
+    #[tool(description = "Send text to the connected serial device. Newline appended automatically.")]
+    async fn send_serial(
+        &self,
+        Parameters(params): Parameters<SendParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let mut s = self.state.lock().await;
+        let sender = s
+            .engine
+            .as_ref()
+            .map(|e| e.cmd_sender())
+            .ok_or_else(|| McpError::invalid_request("Not connected".to_string(), None))?;
+
+        push_log(&mut s.log, "sent", &params.text);
+        drop(s);
+
+        let mut data = params.text.into_bytes();
+        data.push(b'\n');
+        sender
+            .send(Command::Send { data })
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        Ok(CallToolResult::success(vec![Content::text("Sent.")]))
+    }
+
+    #[tool(description = "Clear all log entries.")]
+    async fn clear_logs(&self) -> Result<CallToolResult, McpError> {
+        self.state.lock().await.log.clear();
+        Ok(CallToolResult::success(vec![Content::text(
+            "Logs cleared.",
+        )]))
+    }
+}
+
+#[tool_handler]
+impl ServerHandler for HeadlessMcp {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(Implementation::new(
+                "comrade",
+                env!("CARGO_PKG_VERSION"),
+            ))
+            .with_protocol_version(ProtocolVersion::V_2025_03_26)
+            .with_instructions(
+                "COMrade serial monitor (headless). Tools: list_devices, connect, \
+                 disconnect, get_status, get_logs, search_logs, send_serial, clear_logs."
+                    .to_string(),
+            )
+    }
+}
+
+async fn start_http_mcp(state: SharedState) {
+    let ct = tokio_util::sync::CancellationToken::new();
+
+    let service = StreamableHttpService::new(
+        move || Ok(HeadlessMcp::new(state.clone())),
+        LocalSessionManager::default().into(),
+        StreamableHttpServerConfig {
+            stateful_mode: false,
+            json_response: true,
+            cancellation_token: ct.child_token(),
+            ..Default::default()
+        },
+    );
+
+    let router = axum::Router::new().nest_service("/mcp", service);
+
+    match tokio::net::TcpListener::bind(MCP_PORT).await {
+        Ok(listener) => {
+            info!("Headless MCP server listening on http://{MCP_PORT}/mcp");
+            if let Err(e) = axum::serve(listener, router).await {
+                warn!("MCP server error: {e}");
+            }
+        }
+        Err(e) => {
+            warn!("Failed to bind {MCP_PORT}: {e}");
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Event drain — streams Engine events into the shared log buffer
+// ═══════════════════════════════════════════════════════════════════════
+
+async fn drain_events(state: SharedState) {
     let mut event_rx = {
         let s = state.lock().await;
         match &s.engine {
@@ -391,7 +477,12 @@ async fn drain_events(state: State) {
     let mut line_buf = String::new();
 
     loop {
-        match tokio::time::timeout(std::time::Duration::from_millis(100), event_rx.recv()).await {
+        match tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            event_rx.recv(),
+        )
+        .await
+        {
             Ok(Ok(Event::Data { bytes, .. })) => {
                 let mut s = state.lock().await;
                 s.rx_bytes += bytes.len() as u64;
@@ -411,7 +502,11 @@ async fn drain_events(state: State) {
             Ok(Ok(Event::Connected { port, config, .. })) => {
                 let mut s = state.lock().await;
                 s.connected = true;
-                push_log(&mut s.log, "system", &format!("Connected to {} at {} baud", port, config.baud_rate));
+                push_log(
+                    &mut s.log,
+                    "system",
+                    &format!("Connected to {} at {} baud", port, config.baud_rate),
+                );
             }
             Ok(Ok(Event::Disconnected { reason, .. })) => {
                 let mut s = state.lock().await;
@@ -434,7 +529,9 @@ async fn drain_events(state: State) {
                     push_log(&mut s.log, "received", &std::mem::take(&mut line_buf));
                 }
                 let s = state.lock().await;
-                if s.engine.is_none() { return; }
+                if s.engine.is_none() {
+                    return;
+                }
             }
         }
     }
