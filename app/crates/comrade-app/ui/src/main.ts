@@ -54,6 +54,7 @@ interface Tab {
   dtrState: boolean;
   rtsState: boolean;
   draftInput: string;
+  isRemote: boolean;
   tabBtn: HTMLElement;
 }
 
@@ -187,6 +188,7 @@ function createTab(label: string, tooltip?: string, kind: TabKind = "serial"): T
     dtrState: true,
     rtsState: false,
     draftInput: "",
+    isRemote: false,
     tabBtn,
   };
 
@@ -294,13 +296,54 @@ function stopDeviceListPolling(): void {
 async function refreshDevices(): Promise<void> {
   try {
     const devices = await invoke<DeviceInfo[]>("list_devices");
-    const json = JSON.stringify(devices);
+
+    // Check for a remote headless CLI session.
+    const remoteStatus = await invoke<any>("check_remote_mcp").catch(() => null);
+
+    const json = JSON.stringify(devices) + JSON.stringify(remoteStatus);
     if (json === lastDeviceListJson) return;
     lastDeviceListJson = json;
 
     portListEl.innerHTML = "";
-    if (devices.length === 0) {
-      portListEl.innerHTML = '<div class="no-ports"><div class="no-ports-icon">\u{1F50C}</div><div>No devices found</div><div class="no-ports-hint">Connect a USB or BLE device to get started</div></div>';
+
+    // Show remote session banner if headless CLI is connected.
+    if (remoteStatus && remoteStatus.connected && remoteStatus.port) {
+      const div = document.createElement("div");
+      div.className = "port-item remote-item";
+
+      const topRow = document.createElement("div");
+      topRow.className = "port-item-top";
+
+      const name = document.createElement("div");
+      name.className = "port-name";
+      name.textContent = remoteStatus.port;
+
+      const badges = document.createElement("div");
+      badges.className = "device-badges";
+      const remoteBadge = document.createElement("span");
+      remoteBadge.className = "device-badge badge-ble";
+      remoteBadge.textContent = "REMOTE";
+      const cdcBadge = document.createElement("span");
+      cdcBadge.className = "device-badge badge-serial";
+      cdcBadge.textContent = "CDC";
+      badges.appendChild(remoteBadge);
+      badges.appendChild(cdcBadge);
+
+      topRow.appendChild(name);
+      topRow.appendChild(badges);
+
+      const path = document.createElement("div");
+      path.className = "port-path";
+      path.textContent = `Headless CLI session @ ${remoteStatus.baud || 115200} baud`;
+
+      div.appendChild(topRow);
+      div.appendChild(path);
+      div.addEventListener("click", () => connectRemote(remoteStatus.port));
+      portListEl.appendChild(div);
+    }
+
+    if (devices.length === 0 && !remoteStatus?.connected) {
+      portListEl.innerHTML += '<div class="no-ports"><div class="no-ports-icon">\u{1F50C}</div><div>No devices found</div><div class="no-ports-hint">Connect a USB or BLE device to get started</div></div>';
       return;
     }
     for (const dev of devices) {
@@ -625,6 +668,44 @@ async function connectBleNus(bleId: string, deviceName: string): Promise<void> {
   inputEl.focus();
 }
 
+// ---- Remote connection (headless CLI) ----
+
+async function connectRemote(port: string): Promise<void> {
+  const existing = findExistingTab("serial", port);
+  if (existing) { showTerminalView(existing); return; }
+
+  const label = port.split("/").pop() || port;
+  const tab = createTab(label, port, "serial");
+  tab.isRemote = true;
+
+  showTerminalView(tab);
+  tab.terminal.setConnecting(`${port} (remote)`);
+
+  tab.lineChannel = new Channel<SerialLine>();
+  tab.lineChannel.onmessage = (line: SerialLine) => {
+    tab.terminal.appendLine(line);
+    if (!tab.connected && line.kind !== "system") {
+      markConnected(tab);
+      tab.terminal.setConnected(port, 115200);
+    }
+  };
+
+  try {
+    await invoke("connect_remote", { tabId: tab.id, onLine: tab.lineChannel });
+    markConnected(tab);
+    tab.terminal.setConnected(port, 115200);
+  } catch (e) {
+    tab.terminal.appendLine({
+      timestamp: makeTimestamp(),
+      text: `Failed to connect to remote: ${e}`,
+      kind: "system",
+      rx_bytes_total: 0,
+    });
+  }
+
+  inputEl.focus();
+}
+
 function markConnected(tab: Tab): void {
   tab.connected = true;
   tab.wasConnected = true;
@@ -885,7 +966,11 @@ async function sendSerialInput(tab: Tab, text: string): Promise<void> {
   });
 
   try {
-    await invoke("send_data", { tabId: tab.id, text });
+    if (tab.isRemote) {
+      await invoke("send_remote", { text });
+    } else {
+      await invoke("send_data", { tabId: tab.id, text });
+    }
   } catch (e) {
     tab.terminal.appendLine({
       timestamp: ts,

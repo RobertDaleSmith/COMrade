@@ -126,6 +126,14 @@ body {
   opacity: 1;
 }
 
+.remote-item {
+  border-color: #2A4A6A;
+}
+
+.remote-item::before {
+  background: #5B9BD5 !important;
+}
+
 .port-item-top {
   display: flex;
   align-items: center;

@@ -18,7 +18,7 @@ use crate::log_buffer::{LogBuffer, LogEntry};
 #[cfg(target_os = "macos")]
 use crate::native_ble_nus::NativeBleNusSession;
 
-/// Active connection — Serial, HID, BLE, or nothing.
+/// Active connection — Serial, HID, BLE, Remote, or nothing.
 pub(crate) enum ActiveConnection {
     None,
     Serial {
@@ -34,6 +34,10 @@ pub(crate) enum ActiveConnection {
     #[cfg(target_os = "macos")]
     NativeBleNus {
         session: NativeBleNusSession,
+    },
+    /// Remote connection to a headless CLI MCP server.
+    Remote {
+        cancel: tokio_util::sync::CancellationToken,
     },
 }
 
@@ -572,6 +576,164 @@ pub async fn export_log(
 
 const MAX_EXPORT_ENTRIES: usize = 10_000;
 
+/// Check if a headless CLI MCP server is running on port 9712.
+#[tauri::command]
+pub async fn check_remote_mcp() -> Result<Option<serde_json::Value>, String> {
+    let client = reqwest::Client::new();
+    let body = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1,
+        "method": "tools/call",
+        "params": { "name": "get_status", "arguments": {} }
+    });
+    match client
+        .post("http://127.0.0.1:9712/mcp")
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json, text/event-stream")
+        .json(&body)
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+            // Extract the text content from the MCP response.
+            let text = json
+                .pointer("/result/content/0/text")
+                .and_then(|t| t.as_str())
+                .unwrap_or("{}");
+            let status: serde_json::Value =
+                serde_json::from_str(text).unwrap_or(serde_json::json!(null));
+            Ok(Some(status))
+        }
+        Err(_) => Ok(None),
+    }
+}
+
+/// Connect to a remote headless CLI MCP session. Polls get_logs and
+/// streams lines into the frontend channel.
+#[tauri::command]
+pub async fn connect_remote(
+    tab_id: String,
+    on_line: Channel<SerialLine>,
+    state: State<'_, SharedState>,
+) -> Result<(), String> {
+    let mut app = state.lock().await;
+    let tab = app.get_or_create_tab(&tab_id);
+    shutdown_connection(&mut tab.connection).await;
+
+    let cancel = tokio_util::sync::CancellationToken::new();
+    tab.connection = ActiveConnection::Remote {
+        cancel: cancel.clone(),
+    };
+    tab.line_channel = Some(on_line.clone());
+
+    // Get initial status from headless CLI.
+    let log_buf = tab.log_buffer.clone();
+    let status = tab.status_tracker.clone();
+    drop(app);
+
+    let client = reqwest::Client::new();
+    let mut last_ts = String::new();
+
+    // Poll loop: fetch new logs from the headless CLI every 200ms.
+    tokio::spawn(async move {
+        loop {
+            if cancel.is_cancelled() {
+                return;
+            }
+
+            let body = if last_ts.is_empty() {
+                serde_json::json!({
+                    "jsonrpc": "2.0", "id": 1,
+                    "method": "tools/call",
+                    "params": { "name": "get_logs", "arguments": { "count": 200 } }
+                })
+            } else {
+                serde_json::json!({
+                    "jsonrpc": "2.0", "id": 1,
+                    "method": "tools/call",
+                    "params": { "name": "get_logs", "arguments": { "since": last_ts } }
+                })
+            };
+
+            if let Ok(resp) = client
+                .post("http://127.0.0.1:9712/mcp")
+                .header("Content-Type", "application/json")
+                .header("Accept", "application/json, text/event-stream")
+                .json(&body)
+                .send()
+                .await
+            {
+                if let Ok(json) = resp.json::<serde_json::Value>().await {
+                    let text = json
+                        .pointer("/result/content/0/text")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("");
+
+                    if !text.is_empty() && text != "No log entries." {
+                        for raw_line in text.lines() {
+                            // Parse "[HH:MM:SS.mmm] [kind] text"
+                            if let Some(line) = parse_mcp_log_line(raw_line) {
+                                if line.timestamp > last_ts {
+                                    last_ts = line.timestamp.clone();
+                                }
+                                log_buf.push(LogEntry::Serial(line.clone()));
+                                status.update_rx_bytes(line.rx_bytes_total);
+                                let _ = on_line.send(line);
+                            }
+                        }
+                    }
+                }
+            }
+
+            tokio::select! {
+                _ = cancel.cancelled() => return,
+                _ = tokio::time::sleep(std::time::Duration::from_millis(200)) => {}
+            }
+        }
+    });
+
+    Ok(())
+}
+
+/// Send text through the remote headless CLI MCP.
+#[tauri::command]
+pub async fn send_remote(text: String) -> Result<(), String> {
+    let client = reqwest::Client::new();
+    let body = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1,
+        "method": "tools/call",
+        "params": { "name": "send_serial", "arguments": { "text": text } }
+    });
+    client
+        .post("http://127.0.0.1:9712/mcp")
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json, text/event-stream")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn parse_mcp_log_line(line: &str) -> Option<SerialLine> {
+    // Format: "[HH:MM:SS.mmm] [kind] text"
+    let line = line.strip_prefix('[')?;
+    let (ts, rest) = line.split_once("] [")?;
+    let (kind, text) = rest.split_once("] ")?;
+    Some(SerialLine {
+        timestamp: ts.to_string(),
+        text: text.to_string(),
+        kind: match kind {
+            "received" => "received",
+            "sent" => "sent",
+            "system" => "system",
+            "error" => "system",
+            _ => "received",
+        },
+        rx_bytes_total: 0,
+    })
+}
+
 #[tauri::command]
 pub async fn debug_ble() -> Result<Vec<String>, String> {
     crate::ble_session::debug_ble_peripherals().await
@@ -613,6 +775,9 @@ pub async fn shutdown_connection(conn: &mut ActiveConnection) {
         #[cfg(target_os = "macos")]
         ActiveConnection::NativeBleNus { session } => {
             session.stop().await;
+        }
+        ActiveConnection::Remote { cancel } => {
+            cancel.cancel();
         }
         ActiveConnection::None => {}
     }

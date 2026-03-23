@@ -612,6 +612,7 @@ dependencies = [
  "objc2-core-bluetooth",
  "objc2-foundation 0.2.2",
  "regex",
+ "reqwest 0.12.28",
  "rmcp",
  "schemars 1.2.1",
  "serde",

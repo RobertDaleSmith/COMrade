@@ -36,6 +36,7 @@ objc2 = "0.5"
 objc2-foundation = { version = "0.2", features = ["NSString", "NSArray", "NSUUID", "NSData"] }
 objc2-core-bluetooth = { version = "0.2.2", features = ["CBManager", "CBCentralManager", "CBPeripheral", "CBPeer", "CBUUID", "CBService", "CBCharacteristic", "CBAttribute"] }
 tauri-plugin-dialog = "2"
+reqwest = { version = "0.12", features = ["json"] }
 
 [features]
 default = ["custom-protocol"]
