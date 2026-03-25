@@ -168,10 +168,21 @@ async fn run_headless() -> Result<()> {
         start_http_mcp(http_state).await;
     });
 
-    // Run stdio proxy to our own HTTP server (so Claude gets stdio transport).
     // Wait for our HTTP server to be ready.
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    run_bridge().await
+
+    // Bridge stdio to our own HTTP server. If stdin closes (background process),
+    // the bridge returns and we fall through to keep the HTTP server alive.
+    let bridge_result = run_bridge().await;
+
+    // If bridge exited (stdin closed), keep running for HTTP clients.
+    // This happens when launched in background without a pipe.
+    if bridge_result.is_ok() {
+        eprintln!("Stdin closed, keeping HTTP MCP server alive on port 9712...");
+        tokio::signal::ctrl_c().await.ok();
+    }
+
+    bridge_result
 }
 
 // ═══════════════════════════════════════════════════════════════════════
