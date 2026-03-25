@@ -71,15 +71,34 @@ pub async fn run_daemon(port: String, config: SerialConfig) -> anyhow::Result<()
     let engine_cmd = engine.cmd_sender();
     let sock_cleanup = sock_path.clone();
     let mut grace_handle = tokio::spawn(async move {
+        // Wait for at least one client before starting the watcher.
         loop {
-            // Wait until notified that a client disconnected.
-            notify_clone.notified().await;
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            if count_clone.load(Ordering::Relaxed) > 0 {
+                break;
+            }
+            // If no client connects within 10s, shut down.
+            static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+            let start = START.get_or_init(std::time::Instant::now);
+            if start.elapsed() > std::time::Duration::from_secs(10) {
+                info!("No clients connected within 10s, shutting down daemon");
+                let _ = engine_cmd.send(Command::Shutdown).await;
+                let _ = std::fs::remove_file(&sock_cleanup);
+                return;
+            }
+        }
+
+        // Watch for all clients disconnecting.
+        loop {
+            tokio::select! {
+                _ = notify_clone.notified() => {}
+                _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
+            }
 
             if count_clone.load(Ordering::Relaxed) > 0 {
                 continue;
             }
 
-            // No clients — start 2s grace period.
             debug!("No clients, starting 2s grace period");
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
