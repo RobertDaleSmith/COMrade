@@ -41,16 +41,16 @@ pub struct SearchLogsParams {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct SendSerialParams {
-    #[schemars(description = "Tab ID of the connection to send to")]
-    pub tab_id: String,
+    #[schemars(description = "Tab ID. If omitted, uses the first active connection.")]
+    pub tab_id: Option<String>,
     #[schemars(description = "Text to send to the serial device (newline appended automatically)")]
     pub text: String,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct SendHidReportParams {
-    #[schemars(description = "Tab ID of the connection to send to")]
-    pub tab_id: String,
+    #[schemars(description = "Tab ID. If omitted, uses the first active connection.")]
+    pub tab_id: Option<String>,
     #[schemars(description = "Byte array to send (first byte is report ID)")]
     pub data: Vec<u8>,
     #[schemars(
@@ -73,8 +73,8 @@ pub struct ConnectDeviceParams {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct DisconnectDeviceParams {
-    #[schemars(description = "Tab ID of the connection to disconnect. The tab and its logs are preserved.")]
-    pub tab_id: String,
+    #[schemars(description = "Tab ID. If omitted, disconnects the first active connection.")]
+    pub tab_id: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -89,6 +89,27 @@ pub struct ClearLogsParams {
 pub struct ComradeMcp {
     shared_state: SharedState,
     tool_router: ToolRouter<Self>,
+}
+
+/// Helper: resolve tab_id — if None, find the first active (non-disconnected) tab.
+fn resolve_tab_id(app: &crate::commands::AppState, tab_id: Option<&str>) -> Result<String, McpError> {
+    if let Some(id) = tab_id {
+        if app.tabs.contains_key(id) {
+            return Ok(id.to_string());
+        }
+        return Err(McpError::invalid_request("Tab not found".to_string(), None));
+    }
+    // Find first active tab.
+    for (id, tab) in &app.tabs {
+        let status = tab.status_tracker.snapshot();
+        if status.state != "disconnected" {
+            return Ok(id.clone());
+        }
+    }
+    // Fall back to any tab.
+    app.tabs.keys().next().cloned().ok_or_else(|| {
+        McpError::invalid_request("No active connections".to_string(), None)
+    })
 }
 
 /// Helper: collect log buffers from tabs.
@@ -328,7 +349,9 @@ impl ComradeMcp {
         Parameters(params): Parameters<DisconnectDeviceParams>,
     ) -> Result<CallToolResult, McpError> {
         let mut app = self.shared_state.lock().await;
-        if let Some(mut tab) = app.tabs.remove(&params.tab_id) {
+        let tab_id = resolve_tab_id(&app, params.tab_id.as_deref())?;
+
+        if let Some(mut tab) = app.tabs.remove(&tab_id) {
             crate::commands::shutdown_connection(&mut tab.connection).await;
         }
 
@@ -337,14 +360,13 @@ impl ComradeMcp {
             if let Some(window) = handle.get_webview_window("main") {
                 let _ = window.eval(format!(
                     "window.__mcpCloseTab && window.__mcpCloseTab('{}')",
-                    params.tab_id
+                    tab_id
                 ));
             }
         }
 
         Ok(CallToolResult::success(vec![Content::text(format!(
-            "Disconnected and closed tab {}. Port released.",
-            params.tab_id
+            "Disconnected and closed tab {tab_id}. Port released.",
         ))]))
     }
 
@@ -368,10 +390,8 @@ impl ComradeMcp {
         Parameters(params): Parameters<SendSerialParams>,
     ) -> Result<CallToolResult, McpError> {
         let app = self.shared_state.lock().await;
-        let tab = app
-            .tabs
-            .get(&params.tab_id)
-            .ok_or_else(|| McpError::invalid_request("Tab not found".to_string(), None))?;
+        let tab_id = resolve_tab_id(&app, params.tab_id.as_deref())?;
+        let tab = app.tabs.get(&tab_id).unwrap();
 
         let mcp_line = SerialLine {
             timestamp: Local::now().format("%H:%M:%S%.3f").to_string(),
@@ -420,10 +440,8 @@ impl ComradeMcp {
         Parameters(params): Parameters<SendHidReportParams>,
     ) -> Result<CallToolResult, McpError> {
         let app = self.shared_state.lock().await;
-        let tab = app
-            .tabs
-            .get(&params.tab_id)
-            .ok_or_else(|| McpError::invalid_request("Tab not found".to_string(), None))?;
+        let tab_id = resolve_tab_id(&app, params.tab_id.as_deref())?;
+        let tab = app.tabs.get(&tab_id).unwrap();
         match &tab.connection {
             ActiveConnection::Hid { session } => {
                 let report_type = params.report_type.as_deref().unwrap_or("output");
