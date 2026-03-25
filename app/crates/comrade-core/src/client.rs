@@ -106,35 +106,20 @@ impl DaemonClient {
         Ok(Self { req_tx, event_tx })
     }
 
-    /// Spawn a daemon as a background process.
+    /// Spawn a daemon in a background tokio task (in-process).
+    /// This works for both the GUI and CLI — no external binary needed.
     fn spawn_daemon(port: &str, config: &SerialConfig) -> Result<(), CoreError> {
-        // Find the comrade binary.
-        let exe = which_comrade()?;
-
-        let mut cmd = std::process::Command::new(exe);
-        cmd.arg("--daemon")
-            .arg(port)
-            .arg("-b")
-            .arg(config.baud_rate.to_string())
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
-
-        // Detach on Unix so daemon outlives parent.
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            unsafe {
-                cmd.pre_exec(|| {
-                    libc::setsid();
-                    Ok(())
-                });
+        let port = port.to_string();
+        let config = config.clone();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("daemon runtime");
+            if let Err(e) = rt.block_on(crate::daemon::run_daemon(port, config)) {
+                tracing::warn!("Daemon exited: {e}");
             }
-        }
-
-        cmd.spawn()
-            .map_err(|e| CoreError::Other(format!("Failed to spawn daemon: {e}")))?;
-
+        });
         Ok(())
     }
 
@@ -207,31 +192,3 @@ impl DaemonCmdSender {
     }
 }
 
-/// Find the `comrade` binary in PATH or next to current exe.
-fn which_comrade() -> Result<std::path::PathBuf, CoreError> {
-    // Check PATH.
-    if let Ok(output) = std::process::Command::new("which")
-        .arg("comrade")
-        .output()
-    {
-        if output.status.success() {
-            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !path.is_empty() {
-                return Ok(path.into());
-            }
-        }
-    }
-
-    // Check next to current executable.
-    if let Ok(exe) = std::env::current_exe() {
-        let sibling = exe.with_file_name("comrade");
-        if sibling.exists() {
-            return Ok(sibling);
-        }
-    }
-
-    Err(CoreError::Other(
-        "Cannot find 'comrade' binary. Install with: cargo install --path crates/comrade-cli"
-            .to_string(),
-    ))
-}
