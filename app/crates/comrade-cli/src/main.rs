@@ -1,4 +1,5 @@
 mod mcp;
+mod remote;
 mod tui;
 
 use std::io::{self, Write};
@@ -55,6 +56,36 @@ struct Cli {
     /// Enable verbose logging
     #[arg(short, long)]
     verbose: bool,
+
+    #[command(subcommand)]
+    command: Option<SubCmd>,
+}
+
+#[derive(clap::Subcommand)]
+enum SubCmd {
+    /// Send text to the connected device (via running COMrade instance)
+    Send {
+        /// Text to send (newline appended automatically)
+        text: String,
+    },
+    /// Show recent log entries from the connected device
+    Logs {
+        /// Number of entries to show
+        #[arg(short, long, default_value = "50")]
+        count: usize,
+    },
+    /// Show connection status
+    Status,
+    /// Connect to a serial port (via running COMrade instance)
+    Connect {
+        /// Serial port path
+        port: String,
+        /// Baud rate
+        #[arg(short, long, default_value = "115200")]
+        baud: u32,
+    },
+    /// Disconnect the active connection
+    Disconnect,
 }
 
 impl Cli {
@@ -117,6 +148,19 @@ fn main() -> Result<()> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
+
+    // Subcommands — these proxy through the MCP HTTP API.
+    if let Some(cmd) = cli.command {
+        return rt.block_on(async {
+            match cmd {
+                SubCmd::Send { text } => remote::send(&text).await,
+                SubCmd::Logs { count } => remote::logs(count).await,
+                SubCmd::Status => remote::status().await,
+                SubCmd::Connect { port, baud } => remote::connect(&port, baud).await,
+                SubCmd::Disconnect => remote::disconnect().await,
+            }
+        });
+    }
 
     if cli.mcp {
         return rt.block_on(mcp::run_mcp());
