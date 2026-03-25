@@ -3,7 +3,7 @@ use std::sync::mpsc as std_mpsc;
 use std::time::Duration;
 
 use anyhow::Result;
-use comrade_core::Engine;
+use comrade_core::DaemonClient;
 use comrade_protocol::{Command, SerialConfig};
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::terminal::{
@@ -24,31 +24,22 @@ pub fn run_tui(
     port: String,
     config: SerialConfig,
 ) -> Result<()> {
-    // Spawn the engine inside the runtime.
-    let engine = rt.block_on(async { Engine::spawn() });
-
-    // Subscribe to engine events before connecting.
-    let mut event_rx = engine.subscribe();
-
-    // Send the connect command.
-    rt.block_on(async {
-        engine
-            .send(Command::Connect {
-                port: port.clone(),
-                config,
-            })
-            .await
+    // Connect to the daemon (or spawn one).
+    let client = rt.block_on(async {
+        DaemonClient::connect_or_spawn(&port, &config).await
     })?;
+
+    // Subscribe to engine events.
+    let mut event_rx = client.subscribe();
 
     // Unified event channel (std sync_channel for the blocking main loop).
     let (app_tx, app_rx) = std_mpsc::sync_channel::<AppEvent>(256);
 
-    // Command forwarding channel: TUI (sync) → tokio task → engine.
+    // Command forwarding channel: TUI (sync) → tokio task → daemon client.
     let (cmd_tx, mut cmd_fwd_rx) = tokio_mpsc::unbounded_channel::<Command>();
-    // Engine::send is async, so we forward commands from a tokio task.
     rt.spawn(async move {
         while let Some(cmd) = cmd_fwd_rx.recv().await {
-            if engine.send(cmd).await.is_err() {
+            if client.send_command(cmd).await.is_err() {
                 break;
             }
         }

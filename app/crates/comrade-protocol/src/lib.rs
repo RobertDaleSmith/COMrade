@@ -1,11 +1,13 @@
 mod config;
-mod event;
 mod command;
+mod daemon;
+mod event;
 mod timestamp;
 
 pub use config::*;
 pub use event::*;
 pub use command::*;
+pub use daemon::*;
 pub use timestamp::*;
 
 #[cfg(test)]

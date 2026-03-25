@@ -6,8 +6,9 @@ use std::io::{self, Write};
 
 use anyhow::Result;
 use clap::Parser;
-use comrade_core::{enumerate_devices, Engine};
-use comrade_protocol::{Command, DataBits, DeviceKind, Event, FlowControl, Parity, SerialConfig, StopBits};
+use comrade_core::{enumerate_devices, DaemonClient};
+use comrade_protocol::{DataBits, DeviceKind, Event, FlowControl, Parity, SerialConfig, StopBits};
+use tokio::sync::broadcast;
 use tracing::debug;
 
 #[derive(Parser)]
@@ -52,6 +53,10 @@ struct Cli {
     /// Start as a stdio MCP server for Claude Code integration
     #[arg(long)]
     mcp: bool,
+
+    /// Run as a background daemon for the given port (internal use)
+    #[arg(long, hide = true)]
+    daemon: bool,
 
     /// Enable verbose logging
     #[arg(short, long)]
@@ -166,6 +171,16 @@ fn main() -> Result<()> {
         return rt.block_on(mcp::run_mcp());
     }
 
+    if cli.daemon {
+        let port = cli.port.clone().unwrap_or_default();
+        if port.is_empty() {
+            eprintln!("error: --daemon requires a port");
+            std::process::exit(1);
+        }
+        let config = cli.serial_config()?;
+        return rt.block_on(comrade_core::run_daemon(port, config));
+    }
+
     let port = match &cli.port {
         Some(p) => p.clone(),
         None => {
@@ -219,15 +234,8 @@ fn list_ports() -> Result<()> {
 }
 
 async fn run_raw(port: String, config: SerialConfig) -> Result<()> {
-    let mut engine = Engine::spawn();
-
-    // Connect.
-    engine
-        .send(Command::Connect {
-            port: port.clone(),
-            config: config.clone(),
-        })
-        .await?;
+    let client = DaemonClient::connect_or_spawn(&port, &config).await?;
+    let mut event_rx = client.subscribe();
 
     // Wait for connected event or error.
     let mut stdout = io::stdout().lock();
@@ -235,8 +243,13 @@ async fn run_raw(port: String, config: SerialConfig) -> Result<()> {
 
     loop {
         tokio::select! {
-            event = engine.recv() => {
-                match event? {
+            event = event_rx.recv() => {
+                let event = match event {
+                    Ok(e) => e,
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                };
+                match event {
                     Event::Connected { port, config, .. } => {
                         connected = true;
                         eprintln!(
@@ -273,7 +286,6 @@ async fn run_raw(port: String, config: SerialConfig) -> Result<()> {
             }
             _ = tokio::signal::ctrl_c() => {
                 eprintln!("\nInterrupted.");
-                let _ = engine.send(Command::Shutdown).await;
                 break;
             }
         }

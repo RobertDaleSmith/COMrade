@@ -405,12 +405,12 @@ impl ComradeMcp {
         }
 
         match &tab.connection {
-            ActiveConnection::Serial { engine, .. } => {
-                let cmd_tx = engine.cmd_sender();
+            ActiveConnection::Serial { client, .. } => {
+                let sender = client.cmd_sender();
                 drop(app);
                 let mut data = params.text.into_bytes();
                 data.push(b'\n');
-                cmd_tx
+                sender
                     .send(Command::Send { data })
                     .await
                     .map_err(|e| McpError::internal_error(e.to_string(), None))?;

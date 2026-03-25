@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::Local;
-use comrade_core::{enumerate_devices, Engine};
+use comrade_core::{enumerate_devices, DaemonClient};
 use comrade_protocol::{Command, DeviceInfo, DeviceKind, Event, SerialConfig};
 use tauri::ipc::Channel;
 use tauri::State;
@@ -22,7 +22,7 @@ use crate::native_ble_nus::NativeBleNusSession;
 pub(crate) enum ActiveConnection {
     None,
     Serial {
-        engine: Engine,
+        client: DaemonClient,
         assembler: LineAssembler,
     },
     Hid {
@@ -173,18 +173,12 @@ pub async fn connect(
         ..SerialConfig::default()
     };
 
-    let engine = Engine::spawn();
-    let mut event_rx = engine.subscribe();
-
-    engine
-        .send(Command::Connect {
-            port: port.clone(),
-            config: config.clone(),
-        })
+    let client = DaemonClient::connect_or_spawn(&port, &config)
         .await
         .map_err(|e| e.to_string())?;
+    let mut event_rx = client.subscribe();
 
-    tab.connection = ActiveConnection::Serial { engine, assembler };
+    tab.connection = ActiveConnection::Serial { client, assembler };
 
     tab.status_tracker.set_serial(&port, baud);
     tab.line_channel = Some(on_line.clone());
@@ -411,8 +405,8 @@ pub async fn send_data(
     }));
 
     match &tab.connection {
-        ActiveConnection::Serial { engine, .. } => {
-            let sender = engine.cmd_sender();
+        ActiveConnection::Serial { client, .. } => {
+            let sender = client.cmd_sender();
             drop(app);
             let mut data = text.into_bytes();
             data.push(b'\n');
@@ -480,9 +474,9 @@ pub async fn set_dtr(
 ) -> Result<(), String> {
     let app = state.lock().await;
     let tab = app.tabs.get(&tab_id).ok_or("Tab not found")?;
-    if let ActiveConnection::Serial { ref engine, .. } = tab.connection {
-        engine
-            .send(Command::SetDtr { active })
+    if let ActiveConnection::Serial { ref client, .. } = tab.connection {
+        client
+            .send_command(Command::SetDtr { active })
             .await
             .map_err(|e| e.to_string())
     } else {
@@ -498,9 +492,9 @@ pub async fn set_rts(
 ) -> Result<(), String> {
     let app = state.lock().await;
     let tab = app.tabs.get(&tab_id).ok_or("Tab not found")?;
-    if let ActiveConnection::Serial { ref engine, .. } = tab.connection {
-        engine
-            .send(Command::SetRts { active })
+    if let ActiveConnection::Serial { ref client, .. } = tab.connection {
+        client
+            .send_command(Command::SetRts { active })
             .await
             .map_err(|e| e.to_string())
     } else {
@@ -515,9 +509,9 @@ pub async fn send_break(
 ) -> Result<(), String> {
     let app = state.lock().await;
     let tab = app.tabs.get(&tab_id).ok_or("Tab not found")?;
-    if let ActiveConnection::Serial { ref engine, .. } = tab.connection {
-        engine
-            .send(Command::SendBreak)
+    if let ActiveConnection::Serial { ref client, .. } = tab.connection {
+        client
+            .send_command(Command::SendBreak)
             .await
             .map_err(|e| e.to_string())
     } else {
@@ -763,8 +757,8 @@ pub fn auto_log_status(
 
 pub async fn shutdown_connection(conn: &mut ActiveConnection) {
     match std::mem::replace(conn, ActiveConnection::None) {
-        ActiveConnection::Serial { engine, .. } => {
-            let _ = engine.send(Command::Shutdown).await;
+        ActiveConnection::Serial { client, .. } => {
+            let _ = client.send_command(Command::Disconnect).await;
         }
         ActiveConnection::Hid { session } => {
             session.stop().await;

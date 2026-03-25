@@ -655,13 +655,17 @@ dependencies = [
 name = "comrade-core"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "arc-swap",
  "bytes",
  "chrono",
  "comrade-protocol",
  "hidapi",
+ "libc",
  "nusb",
  "regex",
+ "serde",
+ "serde_json",
  "serialport",
  "thiserror 2.0.18",
  "tokio",

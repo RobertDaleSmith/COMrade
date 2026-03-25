@@ -19,4 +19,7 @@ pub enum CoreError {
 
     #[error("engine shut down")]
     Shutdown,
+
+    #[error("{0}")]
+    Other(String),
 }

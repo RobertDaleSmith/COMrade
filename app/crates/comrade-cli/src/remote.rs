@@ -61,7 +61,7 @@ pub async fn status() -> Result<()> {
 
 pub async fn connect(port: &str, baud: u32) -> Result<()> {
     // Try GUI's connect_device first (has UI integration).
-    let result = mcp_call(
+    let result = match mcp_call(
         "connect_device",
         serde_json::json!({
             "connection_type": "serial",
@@ -70,24 +70,22 @@ pub async fn connect(port: &str, baud: u32) -> Result<()> {
         }),
     )
     .await
-    .or_else(|_| {
-        // Fall back to headless connect.
-        tokio::runtime::Handle::current().block_on(
-            mcp_call("connect", serde_json::json!({ "port": port, "baud": baud })),
-        )
-    })?;
+    {
+        Ok(r) => r,
+        Err(_) => {
+            // Fall back to headless connect.
+            mcp_call("connect", serde_json::json!({ "port": port, "baud": baud })).await?
+        }
+    };
     println!("{result}");
     Ok(())
 }
 
 pub async fn disconnect() -> Result<()> {
-    // Try GUI's disconnect_device first.
-    let result = mcp_call("disconnect_device", serde_json::json!({}))
-        .await
-        .or_else(|_| {
-            tokio::runtime::Handle::current()
-                .block_on(mcp_call("disconnect", serde_json::json!({})))
-        })?;
+    let result = match mcp_call("disconnect_device", serde_json::json!({})).await {
+        Ok(r) => r,
+        Err(_) => mcp_call("disconnect", serde_json::json!({})).await?,
+    };
     println!("{result}");
     Ok(())
 }
