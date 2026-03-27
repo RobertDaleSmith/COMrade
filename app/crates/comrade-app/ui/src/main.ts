@@ -535,11 +535,14 @@ async function connectToPort(port: string, deviceName?: string): Promise<void> {
   tab.lineChannel.onmessage = (line: SerialLine) => {
     tab.terminal.appendLine(line);
 
+    // Mark connected on first data or explicit Connected event.
+    if (!tab.connected && (line.kind === "received" || (line.kind === "system" && line.text.startsWith("Connected to")))) {
+      markConnected(tab);
+      tab.terminal.setConnected(port, baud);
+    }
+
     if (line.kind === "system") {
-      if (line.text.startsWith("Connected to")) {
-        markConnected(tab);
-        tab.terminal.setConnected(port, baud);
-      } else if (line.text.startsWith("Disconnected:")) {
+      if (line.text.startsWith("Disconnected:")) {
         tab.connected = false;
         scheduleReconnect(tab);
       } else if (line.text.startsWith("Error:")) {
@@ -552,6 +555,10 @@ async function connectToPort(port: string, deviceName?: string): Promise<void> {
 
   try {
     await invoke("connect", { tabId: tab.id, port, baud, onLine: tab.lineChannel });
+    // With the daemon, the connection may already be established.
+    // Mark connected immediately — the line callback will confirm with data.
+    markConnected(tab);
+    tab.terminal.setConnected(port, baud);
   } catch (e) {
     tab.terminal.appendLine({
       timestamp: makeTimestamp(),
@@ -1198,6 +1205,21 @@ document.addEventListener("keydown", (e: KeyboardEvent) => {
   }
 });
 
+// ---- Tooltip helper ----
+
+function showTooltip(anchor: HTMLElement, text: string): void {
+  const tip = document.createElement("div");
+  tip.className = "tooltip-fade";
+  tip.textContent = text;
+  anchor.style.position = "relative";
+  anchor.appendChild(tip);
+  setTimeout(() => tip.classList.add("visible"), 10);
+  setTimeout(() => {
+    tip.classList.remove("visible");
+    setTimeout(() => tip.remove(), 300);
+  }, 1200);
+}
+
 // ---- Copy log ----
 
 async function copyLog(): Promise<void> {
@@ -1205,8 +1227,7 @@ async function copyLog(): Promise<void> {
   if (!tab) return;
   const ok = await tab.terminal.copyLog();
   if (ok) {
-    copyBtn.textContent = "Copied!";
-    setTimeout(() => (copyBtn.textContent = "Copy"), 1500);
+    showTooltip(copyBtn, "Copied!");
   }
 }
 
