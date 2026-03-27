@@ -176,6 +176,13 @@ pub async fn connect(
     let client = DaemonClient::connect_or_spawn(&port, &config)
         .await
         .map_err(|e| e.to_string())?;
+
+    // Send a Connect command in case the daemon's Engine is disconnected
+    // (e.g. device was unplugged and re-plugged).
+    client.send_command(Command::Connect {
+        port: port.clone(),
+        config: config.clone(),
+    }).await.map_err(|e| e.to_string())?;
     let mut event_rx = client.subscribe();
 
     tab.connection = ActiveConnection::Serial { client, assembler };
