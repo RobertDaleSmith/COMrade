@@ -287,7 +287,19 @@ impl ComradeMcp {
             .ok_or_else(|| McpError::internal_error("App not ready".to_string(), None))?;
         drop(app);
 
-        let name = params.device_name.as_deref().unwrap_or("Device");
+        // Look up device name from enumeration if not provided.
+        let name = params.device_name.clone().unwrap_or_else(|| {
+            comrade_core::enumerate_devices()
+                .ok()
+                .and_then(|devs| {
+                    devs.iter().find(|d| {
+                        d.serial_path.as_deref() == Some(&params.path)
+                            || d.hid_path.as_deref() == Some(&params.path)
+                    }).and_then(|d| d.product.clone().or(d.manufacturer.clone()))
+                })
+                .unwrap_or_else(|| params.path.rsplit('/').next().unwrap_or("Device").to_string())
+        });
+        let name = name.as_str();
         let js = match params.connection_type.as_str() {
             "serial" => {
                 let baud = params.baud.unwrap_or(115200);
