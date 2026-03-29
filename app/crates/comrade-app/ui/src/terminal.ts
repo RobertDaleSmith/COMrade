@@ -28,7 +28,7 @@ export class TerminalUI {
   private statusRx: HTMLElement;
   private activityLed: HTMLElement;
   private autoScroll = true;
-  private maxLines = 10000;
+  private maxLines = 5000;
   private timestampsVisible = true;
   private hidReportCount = 0;
   private pendingFragment: DocumentFragment = document.createDocumentFragment();
@@ -492,19 +492,23 @@ export class TerminalUI {
   }
 
   private trimAndScroll(): void {
-    while (this.output.children.length > this.maxLines) {
-      const removed = this.output.firstChild! as HTMLElement;
+    const excess = this.output.children.length - this.maxLines;
+    if (excess > 0) {
+      // Batch remove excess nodes using a range for efficiency.
       if (this.searchActive) {
-        const idx = this.searchMatches.indexOf(removed);
-        if (idx !== -1) {
-          this.searchMatches.splice(idx, 1);
-          if (this.currentMatchIndex >= idx) {
-            this.currentMatchIndex = Math.max(0, this.currentMatchIndex - 1);
-          }
-          this.updateSearchCount();
+        // Clear search matches that are being removed.
+        const removedSet = new Set<HTMLElement>();
+        for (let i = 0; i < excess; i++) {
+          removedSet.add(this.output.children[i] as HTMLElement);
         }
+        this.searchMatches = this.searchMatches.filter(m => !removedSet.has(m));
+        this.currentMatchIndex = Math.min(this.currentMatchIndex, this.searchMatches.length - 1);
+        this.updateSearchCount();
       }
-      this.output.removeChild(removed);
+      const range = document.createRange();
+      range.setStartBefore(this.output.firstChild!);
+      range.setEndAfter(this.output.children[excess - 1]);
+      range.deleteContents();
     }
     if (this.autoScroll) {
       this.output.scrollTop = this.output.scrollHeight;

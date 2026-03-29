@@ -575,7 +575,7 @@ pub async fn export_log(
     Ok(count)
 }
 
-const MAX_EXPORT_ENTRIES: usize = 10_000;
+const MAX_EXPORT_ENTRIES: usize = 5_000;
 
 /// Check if a headless CLI MCP server is running on port 9712.
 #[tauri::command]

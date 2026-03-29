@@ -5,7 +5,7 @@ use crate::auto_log::AutoLogger;
 use crate::hid_session::HidReport;
 use crate::line_assembler::SerialLine;
 
-const MAX_ENTRIES: usize = 10_000;
+const MAX_ENTRIES: usize = 5_000;
 
 /// A unified log entry wrapping either a serial line or a HID report.
 #[derive(Debug, Clone)]

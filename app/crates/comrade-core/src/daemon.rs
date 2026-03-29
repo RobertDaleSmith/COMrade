@@ -47,7 +47,7 @@ pub async fn run_daemon(port: String, config: SerialConfig) -> anyhow::Result<()
     info!("Daemon listening on {}", sock_path.display());
 
     let client_count = Arc::new(AtomicUsize::new(0));
-    let event_tx = Arc::new(broadcast::Sender::new(4096));
+    let event_tx = Arc::new(broadcast::Sender::new(512));
     let shutdown_notify = Arc::new(Notify::new());
 
     // Broadcast engine events to all clients.

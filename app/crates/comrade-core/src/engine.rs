@@ -10,7 +10,7 @@ use tracing::{debug, error, info, warn};
 use crate::error::CoreError;
 
 const CMD_CHANNEL_CAPACITY: usize = 256;
-const EVENT_CHANNEL_CAPACITY: usize = 4096;
+const EVENT_CHANNEL_CAPACITY: usize = 512;
 const READ_BUF_SIZE: usize = 4096;
 
 /// The serial engine. Owns the command/event channels and manages the connection.

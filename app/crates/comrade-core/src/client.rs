@@ -15,7 +15,7 @@ use tracing::{debug, warn};
 use crate::daemon::socket_path_for;
 use crate::error::CoreError;
 
-const EVENT_CAPACITY: usize = 4096;
+const EVENT_CAPACITY: usize = 512;
 
 /// Client handle to a daemon. Send commands, receive events.
 pub struct DaemonClient {
