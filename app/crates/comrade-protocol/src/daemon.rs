@@ -12,6 +12,7 @@ pub enum DaemonRequest {
     SetDtr { active: bool },
     SetRts { active: bool },
     SendBreak,
+    Shutdown,
     Ping,
 }
 

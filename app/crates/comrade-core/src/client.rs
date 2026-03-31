@@ -149,8 +149,8 @@ impl DaemonClient {
             Command::SetDtr { active } => DaemonRequest::SetDtr { active },
             Command::SetRts { active } => DaemonRequest::SetRts { active },
             Command::SendBreak => DaemonRequest::SendBreak,
-            Command::Shutdown => DaemonRequest::Disconnect,
-            Command::ListPorts => return Ok(()), // Not supported through daemon.
+            Command::Shutdown => DaemonRequest::Shutdown,
+            Command::ListPorts => return Ok(()),
         };
         self.req_tx
             .send(req)
@@ -182,7 +182,7 @@ impl DaemonCmdSender {
             Command::SetDtr { active } => DaemonRequest::SetDtr { active },
             Command::SetRts { active } => DaemonRequest::SetRts { active },
             Command::SendBreak => DaemonRequest::SendBreak,
-            Command::Shutdown => DaemonRequest::Disconnect,
+            Command::Shutdown => DaemonRequest::Shutdown,
             Command::ListPorts => return Ok(()),
         };
         self.req_tx

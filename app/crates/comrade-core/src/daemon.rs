@@ -209,6 +209,7 @@ async fn handle_client(
             DaemonRequest::SetDtr { active } => Command::SetDtr { active },
             DaemonRequest::SetRts { active } => Command::SetRts { active },
             DaemonRequest::SendBreak => Command::SendBreak,
+            DaemonRequest::Shutdown => Command::Shutdown,
             DaemonRequest::Ping => unreachable!(),
         };
 

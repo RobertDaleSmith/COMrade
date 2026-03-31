@@ -32,9 +32,12 @@ export class TerminalUI {
   private timestampsVisible = true;
   private hidReportCount = 0;
   private pendingFragment: DocumentFragment = document.createDocumentFragment();
+  private pendingCount = 0;
+  private droppedCount = 0;
   private flushScheduled = false;
   private lastRxLine: SerialLine | null = null;
   private lastHidReport: HidReport | null = null;
+  private static readonly MAX_PENDING = 500;
   private contextMenu: HTMLElement;
   private contextTarget: HTMLElement | null = null;
   private activityTimer: ReturnType<typeof setTimeout> | null = null;
@@ -164,8 +167,17 @@ export class TerminalUI {
     this.contextTarget = null;
   }
 
-  /** Append a line to the terminal output (batched). */
+  /** Append a line to the terminal output (batched, throttled). */
   appendLine(line: SerialLine): void {
+    this.lastRxLine = line;
+
+    // Drop lines when flooding — keep status bar updated but don't create DOM nodes.
+    if (this.pendingCount >= TerminalUI.MAX_PENDING) {
+      this.droppedCount++;
+      this.scheduleFlush();
+      return;
+    }
+
     const div = document.createElement("div");
     div.className = `line ${line.kind}`;
 
@@ -180,14 +192,22 @@ export class TerminalUI {
     div.appendChild(ts);
     div.appendChild(text);
     this.pendingFragment.appendChild(div);
+    this.pendingCount++;
 
-    this.lastRxLine = line;
     this.scheduleFlush();
   }
 
-  /** Append a HID report to the terminal output (batched). */
+  /** Append a HID report to the terminal output (batched, throttled). */
   appendHidReport(report: HidReport): void {
     this.hidReportCount = report.report_count;
+    this.lastHidReport = report;
+
+    if (this.pendingCount >= TerminalUI.MAX_PENDING) {
+      this.droppedCount++;
+      this.scheduleFlush();
+      return;
+    }
+
     const div = document.createElement("div");
     div.className = `line hid-report ${report.kind}`;
 
@@ -211,8 +231,8 @@ export class TerminalUI {
     div.appendChild(ts);
     div.appendChild(text);
     this.pendingFragment.appendChild(div);
+    this.pendingCount++;
 
-    this.lastHidReport = report;
     this.scheduleFlush();
   }
 
@@ -228,8 +248,23 @@ export class TerminalUI {
     this.flushScheduled = false;
 
     // Append all pending elements at once.
-    this.output.appendChild(this.pendingFragment);
+    if (this.pendingCount > 0) {
+      this.output.appendChild(this.pendingFragment);
+    }
     this.pendingFragment = document.createDocumentFragment();
+    this.pendingCount = 0;
+
+    // Show dropped line indicator if we throttled.
+    if (this.droppedCount > 0) {
+      const div = document.createElement("div");
+      div.className = "line system";
+      const text = document.createElement("span");
+      text.className = "text";
+      text.textContent = `[${this.droppedCount} lines dropped — output too fast]`;
+      div.appendChild(text);
+      this.output.appendChild(div);
+      this.droppedCount = 0;
+    }
 
     // Apply search to newly added lines.
     if (this.searchActive) {

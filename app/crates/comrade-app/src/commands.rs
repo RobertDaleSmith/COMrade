@@ -766,6 +766,10 @@ pub async fn shutdown_connection(conn: &mut ActiveConnection) {
     match std::mem::replace(conn, ActiveConnection::None) {
         ActiveConnection::Serial { client, .. } => {
             let _ = client.send_command(Command::Disconnect).await;
+            // Give the Engine a moment to close the port, then kill the daemon
+            // so the next connect gets a clean state.
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let _ = client.send_command(Command::Shutdown).await;
         }
         ActiveConnection::Hid { session } => {
             session.stop().await;
