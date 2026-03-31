@@ -194,6 +194,18 @@ async fn handle_command(
 ) {
     match cmd {
         Command::Connect { port: path, config } => {
+            // If already connected to this port, just re-send the Connected event
+            // so new clients get the notification.
+            if port.is_some() {
+                info!("already connected to {path}, notifying new client");
+                let _ = event_tx.send(Event::Connected {
+                    ts: make_timestamp(epoch),
+                    port: path,
+                    config,
+                });
+                return;
+            }
+
             info!("connecting to {path} at {} baud", config.baud_rate);
 
             let (baud, data_bits, parity, stop_bits, flow) = to_serialport_config(&config);
