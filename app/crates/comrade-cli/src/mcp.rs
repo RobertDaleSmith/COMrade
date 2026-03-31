@@ -38,6 +38,23 @@ const MCP_PORT: &str = "127.0.0.1:9712";
 // Entry point
 // ═══════════════════════════════════════════════════════════════════════
 
+/// Start headless MCP HTTP server in a background task (for use by CLI subcommands).
+pub async fn start_headless_background() {
+    let state: SharedState = Arc::new(Mutex::new(ConnState {
+        engine: None,
+        port: None,
+        baud: None,
+        connected: false,
+        rx_bytes: 0,
+        log: VecDeque::with_capacity(MAX_LOG),
+    }));
+    tokio::spawn(async move {
+        start_http_mcp(state).await;
+    });
+    // Wait for server to be ready.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+}
+
 pub async fn run_mcp() -> Result<()> {
     if is_mcp_reachable().await {
         eprintln!("COMrade detected on port 9712, bridging...");

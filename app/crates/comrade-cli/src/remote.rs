@@ -8,7 +8,52 @@ use anyhow::{bail, Result};
 
 const MCP_URL: &str = "http://127.0.0.1:9712/mcp";
 
+/// Ensure a headless MCP server is running, starting one if needed.
+async fn ensure_mcp_running() {
+    let client = reqwest::Client::new();
+    if client
+        .post(MCP_URL)
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json, text/event-stream")
+        .body("{}")
+        .send()
+        .await
+        .is_ok()
+    {
+        return; // Already running.
+    }
+
+    // Start headless MCP server as a detached background process.
+    eprintln!("Starting COMrade headless server...");
+    let exe = std::env::current_exe().unwrap_or_else(|_| "comrade".into());
+    let _ = std::process::Command::new(exe)
+        .arg("--mcp")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+
+    // Wait for it to be ready.
+    for _ in 0..20 {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        if client
+            .post(MCP_URL)
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json, text/event-stream")
+            .body("{}")
+            .send()
+            .await
+            .is_ok()
+        {
+            return;
+        }
+    }
+    eprintln!("Warning: headless server may not have started");
+}
+
 async fn mcp_call(tool: &str, args: serde_json::Value) -> Result<String> {
+    ensure_mcp_running().await;
+
     let client = reqwest::Client::new();
     let body = serde_json::json!({
         "jsonrpc": "2.0",
@@ -24,7 +69,7 @@ async fn mcp_call(tool: &str, args: serde_json::Value) -> Result<String> {
         .json(&body)
         .send()
         .await
-        .map_err(|_| anyhow::anyhow!("COMrade not running (no MCP server on port 9712)"))?;
+        .map_err(|_| anyhow::anyhow!("Failed to connect to COMrade MCP server"))?;
 
     let json: serde_json::Value = resp.json().await?;
 
