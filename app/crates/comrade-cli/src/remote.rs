@@ -1,59 +1,95 @@
-//! Remote commands — talk to a running COMrade instance (GUI or headless CLI)
-//! via the HTTP MCP API on port 9712.
-//!
-//! These commands never open the serial port directly. They proxy through
-//! whichever COMrade instance currently owns it.
+//! Remote commands — talk to a running COMrade instance (GUI or headless)
+//! via the daemon's Unix socket, or directly via Engine for simple operations.
 
 use anyhow::{bail, Result};
+use comrade_core::{DaemonClient, enumerate_devices};
+use comrade_protocol::SerialConfig;
 
-const MCP_URL: &str = "http://127.0.0.1:9712/mcp";
-
-/// Ensure a headless MCP server is running, starting one if needed.
-async fn ensure_mcp_running() {
-    let client = reqwest::Client::new();
-    if client
-        .post(MCP_URL)
-        .header("Content-Type", "application/json")
-        .header("Accept", "application/json, text/event-stream")
-        .body("{}")
-        .send()
-        .await
-        .is_ok()
-    {
-        return; // Already running.
-    }
-
-    // Start headless MCP server as a detached background process.
-    eprintln!("Starting COMrade headless server...");
-    let exe = std::env::current_exe().unwrap_or_else(|_| "comrade".into());
-    let _ = std::process::Command::new(exe)
-        .arg("--mcp")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
-
-    // Wait for it to be ready.
-    for _ in 0..20 {
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        if client
-            .post(MCP_URL)
-            .header("Content-Type", "application/json")
-            .header("Accept", "application/json, text/event-stream")
-            .body("{}")
-            .send()
-            .await
-            .is_ok()
-        {
-            return;
-        }
-    }
-    eprintln!("Warning: headless server may not have started");
+pub async fn send(text: &str) -> Result<()> {
+    let client = find_active_client().await?;
+    client
+        .send_command(comrade_protocol::Command::Send {
+            data: format!("{text}\n").into_bytes(),
+        })
+        .await?;
+    println!("Sent.");
+    Ok(())
 }
 
-async fn mcp_call(tool: &str, args: serde_json::Value) -> Result<String> {
-    ensure_mcp_running().await;
+pub async fn logs(count: usize) -> Result<()> {
+    // Try MCP HTTP first (GUI or headless MCP running).
+    if let Ok(text) = mcp_call("get_logs", serde_json::json!({ "count": count })).await {
+        println!("{text}");
+        return Ok(());
+    }
+    bail!("No COMrade instance running. Open the GUI or connect to a port first.");
+}
 
+pub async fn status() -> Result<()> {
+    if let Ok(text) = mcp_call("get_status", serde_json::json!({})).await {
+        println!("{text}");
+        return Ok(());
+    }
+    // No MCP — check for daemon sockets.
+    let devices = enumerate_devices().unwrap_or_default();
+    let mut found = false;
+    for dev in &devices {
+        if let Some(ref path) = dev.serial_path {
+            if comrade_core::daemon_is_running(path) {
+                println!("Daemon active: {path}");
+                found = true;
+            }
+        }
+    }
+    if !found {
+        println!("No active connections.");
+    }
+    Ok(())
+}
+
+pub async fn connect(port: &str, baud: u32) -> Result<()> {
+    let config = SerialConfig {
+        baud_rate: baud,
+        ..SerialConfig::default()
+    };
+    let client = DaemonClient::connect_or_spawn(port, &config).await?;
+    // Send Connect in case daemon already exists but port is disconnected.
+    client
+        .send_command(comrade_protocol::Command::Connect {
+            port: port.to_string(),
+            config,
+        })
+        .await?;
+    println!("Connected to {port} at {baud} baud");
+    Ok(())
+}
+
+pub async fn disconnect() -> Result<()> {
+    if let Ok(text) = mcp_call("disconnect_device", serde_json::json!({})).await {
+        println!("{text}");
+        return Ok(());
+    }
+    bail!("No COMrade instance running.");
+}
+
+/// Find an active DaemonClient by checking known daemon sockets.
+async fn find_active_client() -> Result<DaemonClient> {
+    let devices = enumerate_devices().unwrap_or_default();
+    for dev in &devices {
+        if let Some(ref path) = dev.serial_path {
+            if comrade_core::daemon_is_running(path) {
+                let config = SerialConfig::default();
+                if let Ok(client) = DaemonClient::connect_or_spawn(path, &config).await {
+                    return Ok(client);
+                }
+            }
+        }
+    }
+    bail!("No active daemon. Connect to a port first: comrade connect <port>");
+}
+
+/// Try calling the MCP HTTP API (GUI or headless MCP server).
+async fn mcp_call(tool: &str, args: serde_json::Value) -> Result<String> {
     let client = reqwest::Client::new();
     let body = serde_json::json!({
         "jsonrpc": "2.0",
@@ -63,18 +99,22 @@ async fn mcp_call(tool: &str, args: serde_json::Value) -> Result<String> {
     });
 
     let resp = client
-        .post(MCP_URL)
+        .post("http://127.0.0.1:9712/mcp")
         .header("Content-Type", "application/json")
         .header("Accept", "application/json, text/event-stream")
         .json(&body)
         .send()
-        .await
-        .map_err(|_| anyhow::anyhow!("Failed to connect to COMrade MCP server"))?;
+        .await?;
 
     let json: serde_json::Value = resp.json().await?;
 
     if let Some(err) = json.get("error") {
-        bail!("{}", err.get("message").and_then(|m| m.as_str()).unwrap_or("MCP error"));
+        bail!(
+            "{}",
+            err.get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("MCP error")
+        );
     }
 
     let text = json
@@ -84,53 +124,4 @@ async fn mcp_call(tool: &str, args: serde_json::Value) -> Result<String> {
         .to_string();
 
     Ok(text)
-}
-
-pub async fn send(text: &str) -> Result<()> {
-    let result = mcp_call("send_serial", serde_json::json!({ "text": text })).await?;
-    println!("{result}");
-    Ok(())
-}
-
-pub async fn logs(count: usize) -> Result<()> {
-    let result = mcp_call("get_logs", serde_json::json!({ "count": count })).await?;
-    println!("{result}");
-    Ok(())
-}
-
-pub async fn status() -> Result<()> {
-    let result = mcp_call("get_status", serde_json::json!({})).await?;
-    println!("{result}");
-    Ok(())
-}
-
-pub async fn connect(port: &str, baud: u32) -> Result<()> {
-    // Try GUI's connect_device first (has UI integration).
-    let result = match mcp_call(
-        "connect_device",
-        serde_json::json!({
-            "connection_type": "serial",
-            "path": port,
-            "baud": baud,
-        }),
-    )
-    .await
-    {
-        Ok(r) => r,
-        Err(_) => {
-            // Fall back to headless connect.
-            mcp_call("connect", serde_json::json!({ "port": port, "baud": baud })).await?
-        }
-    };
-    println!("{result}");
-    Ok(())
-}
-
-pub async fn disconnect() -> Result<()> {
-    let result = match mcp_call("disconnect_device", serde_json::json!({})).await {
-        Ok(r) => r,
-        Err(_) => mcp_call("disconnect", serde_json::json!({})).await?,
-    };
-    println!("{result}");
-    Ok(())
 }

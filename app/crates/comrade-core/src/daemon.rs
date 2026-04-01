@@ -72,15 +72,13 @@ pub async fn run_daemon(port: String, config: SerialConfig) -> anyhow::Result<()
     let sock_cleanup = sock_path.clone();
     let mut grace_handle = tokio::spawn(async move {
         // Wait for at least one client before starting the watcher.
+        let wait_start = std::time::Instant::now();
         loop {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             if count_clone.load(Ordering::Relaxed) > 0 {
                 break;
             }
-            // If no client connects within 10s, shut down.
-            static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-            let start = START.get_or_init(std::time::Instant::now);
-            if start.elapsed() > std::time::Duration::from_secs(10) {
+            if wait_start.elapsed() > std::time::Duration::from_secs(10) {
                 info!("No clients connected within 10s, shutting down daemon");
                 let _ = engine_cmd.send(Command::Shutdown).await;
                 let _ = std::fs::remove_file(&sock_cleanup);
@@ -147,6 +145,13 @@ pub async fn run_daemon(port: String, config: SerialConfig) -> anyhow::Result<()
         }
     }
 
+    // Explicitly shut down the engine and drop it to release the serial port FD.
+    let _ = engine.send(comrade_protocol::Command::Shutdown).await;
+    drop(engine);
+    // Give a moment for the engine task to close the port.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    // Clean up socket.
+    let _ = std::fs::remove_file(&sock_path);
     info!("Daemon stopped for {port}");
     Ok(())
 }
