@@ -232,10 +232,32 @@ async fn handle_command(
                     });
                 }
                 Err(e) => {
-                    error!("failed to open {path}: {e}");
+                    let mut msg = format!("failed to open {path}: {e}");
+
+                    // Check what process holds the port (macOS/Linux).
+                    if e.to_string().contains("busy") || e.to_string().contains("Resource busy") {
+                        if let Ok(output) = std::process::Command::new("lsof")
+                            .arg(&path)
+                            .output()
+                        {
+                            let lsof = String::from_utf8_lossy(&output.stdout);
+                            for line in lsof.lines().skip(1) {
+                                let parts: Vec<&str> = line.split_whitespace().collect();
+                                if parts.len() >= 2 {
+                                    msg = format!(
+                                        "failed to open {path}: port held by {} (PID {})",
+                                        parts[0], parts[1]
+                                    );
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    error!("{msg}");
                     let _ = event_tx.send(Event::Error {
                         ts: make_timestamp(epoch),
-                        message: format!("failed to open {path}: {e}"),
+                        message: msg,
                     });
                 }
             }
