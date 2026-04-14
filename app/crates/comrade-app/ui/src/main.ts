@@ -1392,6 +1392,14 @@ clearBtn.addEventListener("click", () => activeTab()?.terminal.clear());
 disconnectBtn.addEventListener("click", disconnect);
 descriptorBtn.addEventListener("click", toggleDescriptor);
 
+const chartBtn = document.getElementById("chart-btn")!;
+chartBtn.addEventListener("click", () => {
+  const tab = activeTab();
+  if (!tab) return;
+  const showing = tab.terminal.toggleChart();
+  chartBtn.classList.toggle("active", showing);
+});
+
 // ---- Menu events ----
 
 let showTimestamps = true;

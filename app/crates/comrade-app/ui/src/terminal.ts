@@ -1,3 +1,5 @@
+import { SerialChart } from "./chart";
+
 /** A line received from the Rust backend. */
 export interface SerialLine {
   timestamp: string;
@@ -27,6 +29,7 @@ export class TerminalUI {
   private statusState: HTMLElement;
   private statusRx: HTMLElement;
   private activityLed: HTMLElement;
+  private chart: SerialChart;
   private autoScroll = true;
   private maxLines = 5000;
   private timestampsVisible = true;
@@ -95,7 +98,12 @@ export class TerminalUI {
     // Create a dedicated output container for this tab (hidden until activated).
     this.output = document.createElement("div");
     this.output.className = "output hidden";
-    document.getElementById("terminal-body")!.appendChild(this.output);
+    const termBody = document.getElementById("terminal-body")!;
+    termBody.appendChild(this.output);
+
+    // Chart overlay (hidden by default).
+    this.chart = new SerialChart();
+    this.chart.mount(termBody);
 
     // Track scroll position for auto-scroll.
     this.output.addEventListener("scroll", () => {
@@ -170,6 +178,11 @@ export class TerminalUI {
   /** Append a line to the terminal output (batched, throttled). */
   appendLine(line: SerialLine): void {
     this.lastRxLine = line;
+
+    // Feed received data to chart.
+    if (line.kind === "received") {
+      this.chart.feedLine(line.text);
+    }
 
     // Drop lines when flooding — keep status bar updated but don't create DOM nodes.
     if (this.pendingCount >= TerminalUI.MAX_PENDING) {
@@ -293,12 +306,24 @@ export class TerminalUI {
     this.trimAndScroll();
   }
 
-  /** Clear all output lines. */
+  /** Clear all output lines and chart data. */
   clear(): void {
     this.output.innerHTML = "";
     this.searchMatches = [];
     this.currentMatchIndex = -1;
     this.updateSearchCount();
+    this.chart.clear();
+  }
+
+  /** Toggle chart view. Returns true if chart is now visible. */
+  toggleChart(): boolean {
+    const showing = this.chart.toggle();
+    if (showing) {
+      this.output.classList.add("hidden");
+    } else {
+      this.output.classList.remove("hidden");
+    }
+    return showing;
   }
 
   /** Set connection info in the status bar for serial. */
@@ -615,6 +640,7 @@ export class TerminalUI {
     this.output.remove();
     this.statusBar.remove();
     this.contextMenu.remove();
+    this.chart.destroy();
   }
 
   private formatBytes(n: number): string {

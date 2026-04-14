@@ -437,6 +437,7 @@ body {
 #terminal-body {
   flex: 1;
   display: flex;
+  position: relative;
   overflow: hidden;
 }
 
@@ -1054,4 +1055,32 @@ body {
 
 .tooltip-fade.visible {
   opacity: 1;
+}
+
+/* ---- Serial chart ---- */
+
+.serial-chart {
+  flex: 1;
+  overflow: hidden;
+  background: var(--bg-deep);
+  padding: 8px;
+}
+
+.serial-chart.hidden {
+  display: none;
+}
+
+.serial-chart .u-legend {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--fg-secondary);
+}
+
+.serial-chart .u-legend .u-label {
+  color: var(--fg-secondary);
+}
+
+.serial-chart .u-legend .u-value {
+  color: var(--fg-primary);
+  font-weight: 600;
 }
