@@ -24,15 +24,16 @@ export class SerialChart {
   /** Mount into a parent element. */
   mount(parent: HTMLElement): void {
     parent.appendChild(this.container);
+    // Auto-resize when container changes size.
+    new ResizeObserver(() => this.resize()).observe(this.container);
   }
 
   /** Show the chart, hide terminal output. */
   show(): void {
     this.visible = true;
     this.container.classList.remove("hidden");
-    if (this.plot) {
-      this.resize();
-    }
+    // Delay resize to let layout settle.
+    requestAnimationFrame(() => this.resize());
   }
 
   /** Hide the chart, show terminal output. */
@@ -95,8 +96,8 @@ export class SerialChart {
   resize(): void {
     if (!this.plot || !this.visible) return;
     const rect = this.container.getBoundingClientRect();
-    if (rect.width > 0 && rect.height > 0) {
-      this.plot.setSize({ width: rect.width, height: rect.height });
+    if (rect.width > 100 && rect.height > 100) {
+      this.plot.setSize({ width: rect.width, height: Math.max(rect.height - 30, 100) });
     }
   }
 
@@ -133,9 +134,10 @@ export class SerialChart {
       });
     }
 
+    const rect = this.container.getBoundingClientRect();
     const opts: uPlot.Options = {
-      width: this.container.clientWidth || 600,
-      height: this.container.clientHeight || 250,
+      width: Math.max(rect.width, 100),
+      height: Math.max(rect.height - 30, 100), // leave room for legend
       series,
       scales: {
         x: { time: false },
