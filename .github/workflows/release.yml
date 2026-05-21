@@ -48,6 +48,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: swatinem/rust-cache@v2
@@ -56,6 +60,10 @@ jobs:
 
       - name: Sync version into manifests
         run: bash ../scripts/sync-version.sh
+
+      - name: Build frontend
+        working-directory: app/crates/comrade-app/ui
+        run: npm ci && npm run build
 
       - name: Run tests
         run: cargo test --workspace
