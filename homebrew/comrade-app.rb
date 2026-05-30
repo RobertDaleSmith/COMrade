@@ -1,6 +1,6 @@
 cask "comrade-app" do
   version "0.1.0"
-  sha256 "REPLACE_WITH_ACTUAL_SHA256"
+  sha256 "4c4b033324456dc95c004cc201f6d92c5871ae5a31de3350154d86a22961f68a"
 
   url "https://github.com/RobertDaleSmith/COMrade/releases/download/v#{version}/COMrade_#{version}_aarch64.dmg"
   name "COMrade"
