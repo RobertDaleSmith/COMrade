@@ -93,7 +93,6 @@ Run both backend and frontend checks before considering any change complete.
 ## Commit Guidelines
 
 - Commit messages: imperative mood, first line under 72 chars
-- Include `Co-Authored-By` trailer for AI-assisted commits
 - Run clippy + tests + frontend build before committing
 - One logical change per commit — don't bundle unrelated fixes
 
