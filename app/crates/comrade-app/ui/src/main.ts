@@ -75,6 +75,7 @@ const refreshBtn = document.getElementById("refresh-btn")!;
 const inputEl = document.getElementById("input") as HTMLInputElement;
 const copyBtn = document.getElementById("copy-btn")!;
 const clearBtn = document.getElementById("clear-btn")!;
+const pauseBtn = document.getElementById("pause-btn")!;
 const disconnectBtn = document.getElementById("disconnect-btn")!;
 const descriptorBtn = document.getElementById("descriptor-btn")!;
 const searchBtn = document.getElementById("search-btn")!;
@@ -135,6 +136,12 @@ function createTab(label: string, tooltip?: string, kind: TabKind = "serial"): T
   const id = generateTabId();
   const terminal = new TerminalUI();
   terminal.setTimestampsVisible(showTimestamps);
+  terminal.setPauseChangeHandler((paused, heldCount) => {
+    // Only the active tab's terminal drives the toolbar button.
+    if (activeTab()?.terminal === terminal) {
+      renderPauseBtn(paused, heldCount);
+    }
+  });
 
   // Create tab button in the tab bar.
   const tabBtn = document.createElement("div");
@@ -243,6 +250,16 @@ function updateToolbar(tab: Tab): void {
 
   dtrBtn.classList.toggle("active", tab.dtrState);
   rtsBtn.classList.toggle("active", tab.rtsState);
+  renderPauseBtn(tab.terminal.isPaused(), tab.terminal.heldLineCount());
+}
+
+function renderPauseBtn(paused: boolean, heldCount: number): void {
+  pauseBtn.classList.toggle("active", paused);
+  pauseBtn.title = paused ? "Resume (Space)" : "Pause (Space)";
+  const countEl = pauseBtn.querySelector(".held-count") as HTMLElement | null;
+  if (countEl) {
+    countEl.textContent = paused && heldCount > 0 ? String(heldCount) : "";
+  }
 }
 
 function closeTab(tabId: string): void {
@@ -1203,6 +1220,15 @@ document.addEventListener("keydown", (e: KeyboardEvent) => {
     e.preventDefault();
     if (tab) openSearch();
   }
+  if (e.key === " " && !e.metaKey && !e.ctrlKey && !e.altKey) {
+    const target = e.target as HTMLElement | null;
+    const tag = target?.tagName;
+    // Don't steal Space from text inputs.
+    if (tag !== "INPUT" && tag !== "TEXTAREA" && !target?.isContentEditable) {
+      e.preventDefault();
+      tab?.terminal.togglePause();
+    }
+  }
 });
 
 // ---- Tooltip helper ----
@@ -1389,6 +1415,7 @@ refreshBtn.addEventListener("click", refreshDevices);
 exportBtn?.addEventListener("click", exportLog);
 copyBtn.addEventListener("click", copyLog);
 clearBtn.addEventListener("click", () => activeTab()?.terminal.clear());
+pauseBtn.addEventListener("click", () => activeTab()?.terminal.togglePause());
 disconnectBtn.addEventListener("click", disconnect);
 descriptorBtn.addEventListener("click", toggleDescriptor);
 

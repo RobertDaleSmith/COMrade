@@ -525,6 +525,19 @@ body {
   font-style: italic;
 }
 
+/* Consecutive-duplicate counter (× N) appended to a repeated line. */
+.dup-count {
+  margin-left: 8px;
+  padding: 0 5px;
+  border-radius: 8px;
+  background: var(--bg-elevated);
+  color: var(--fg-tertiary);
+  font-size: 10px;
+  font-weight: bold;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
 /* ---- Tab bar ---- */
 
 #tab-bar {
@@ -693,6 +706,29 @@ body {
   background: var(--accent-red-dim);
   color: var(--fg-primary);
   border-color: var(--accent-red);
+}
+
+/* Pause button: pause icon by default, play icon + held count when active. */
+#pause-btn .play-icon {
+  display: none;
+}
+
+#pause-btn.active .pause-icon {
+  display: none;
+}
+
+#pause-btn.active .play-icon {
+  display: inline-block;
+}
+
+#pause-btn .held-count {
+  margin-left: 4px;
+  font-size: 10px;
+  font-weight: bold;
+}
+
+#pause-btn .held-count:empty {
+  display: none;
 }
 
 #serial-controls.hidden {

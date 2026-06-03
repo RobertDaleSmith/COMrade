@@ -55,6 +55,20 @@ export class TerminalUI {
   private currentMatchIndex = -1;
   private searchActive = false;
 
+  // Pause state — when paused, new lines accumulate in heldFragment instead of output.
+  private paused = false;
+  private heldFragment: DocumentFragment = document.createDocumentFragment();
+  private heldCount = 0;
+  private heldDropped = 0;
+  private static readonly MAX_HELD = 10000;
+  private onPauseChange: ((paused: boolean, heldCount: number) => void) | null = null;
+
+  // Consecutive-duplicate collapse: when the next line matches the previous one,
+  // increment a × N counter on the existing row instead of adding a new row.
+  private lastLineKey: string | null = null;
+  private lastLineDiv: HTMLElement | null = null;
+  private lastLineDupCount = 1;
+
   constructor() {
     // Create per-tab status bar.
     this.statusBar = document.createElement("div");
@@ -184,6 +198,15 @@ export class TerminalUI {
       this.chart.feedLine(line.text);
     }
 
+    // Consecutive-duplicate collapse: bump × N on the previous row instead of adding a new one.
+    const key = `${line.kind}\x00${line.text}`;
+    if (this.lastLineKey === key && this.lastLineDiv && this.lastLineDiv.parentNode) {
+      this.lastLineDupCount++;
+      this.updateDupCount(this.lastLineDiv);
+      this.scheduleFlush();
+      return;
+    }
+
     // Drop lines when flooding — keep status bar updated but don't create DOM nodes.
     if (this.pendingCount >= TerminalUI.MAX_PENDING) {
       this.droppedCount++;
@@ -207,6 +230,10 @@ export class TerminalUI {
     this.pendingFragment.appendChild(div);
     this.pendingCount++;
 
+    this.lastLineKey = key;
+    this.lastLineDiv = div;
+    this.lastLineDupCount = 1;
+
     this.scheduleFlush();
   }
 
@@ -214,6 +241,10 @@ export class TerminalUI {
   appendHidReport(report: HidReport): void {
     this.hidReportCount = report.report_count;
     this.lastHidReport = report;
+
+    // A HID report breaks the text-line dup chain.
+    this.lastLineKey = null;
+    this.lastLineDiv = null;
 
     if (this.pendingCount >= TerminalUI.MAX_PENDING) {
       this.droppedCount++;
@@ -260,6 +291,24 @@ export class TerminalUI {
   private flushPending(): void {
     this.flushScheduled = false;
 
+    if (this.paused) {
+      // Buffer pending lines into the held fragment (or drop them if the cap is hit).
+      if (this.pendingCount > 0) {
+        if (this.heldCount + this.pendingCount <= TerminalUI.MAX_HELD) {
+          this.heldFragment.appendChild(this.pendingFragment);
+          this.heldCount += this.pendingCount;
+        } else {
+          this.heldDropped += this.pendingCount;
+          // Discarding the fragment drops its DOM nodes.
+        }
+        this.pendingFragment = document.createDocumentFragment();
+        this.pendingCount = 0;
+      }
+      this.updateStatusBarFromLatest();
+      this.notifyPauseChange();
+      return;
+    }
+
     // Append all pending elements at once.
     if (this.pendingCount > 0) {
       this.output.appendChild(this.pendingFragment);
@@ -276,6 +325,9 @@ export class TerminalUI {
       text.textContent = `[${this.droppedCount} lines dropped — output too fast]`;
       div.appendChild(text);
       this.output.appendChild(div);
+      // Inserting a system line breaks the dup chain.
+      this.lastLineKey = null;
+      this.lastLineDiv = null;
       this.droppedCount = 0;
     }
 
@@ -288,7 +340,12 @@ export class TerminalUI {
       }
     }
 
-    // Update status bar from latest data.
+    this.updateStatusBarFromLatest();
+    this.trimAndScroll();
+  }
+
+  /** Pull status-bar updates from the most recent line/report. */
+  private updateStatusBarFromLatest(): void {
     if (this.lastHidReport) {
       const r = this.lastHidReport;
       this.statusRx.textContent = `RX: ${this.formatBytes(r.rx_bytes_total)} (${r.report_count} reports)`;
@@ -302,8 +359,6 @@ export class TerminalUI {
       else if (l.kind === "sent" || l.kind === "mcp") this.pulseActivity("tx");
       this.lastRxLine = null;
     }
-
-    this.trimAndScroll();
   }
 
   /** Clear all output lines and chart data. */
@@ -313,6 +368,15 @@ export class TerminalUI {
     this.currentMatchIndex = -1;
     this.updateSearchCount();
     this.chart.clear();
+    // Reset dup-collapse state (the previous row is gone).
+    this.lastLineKey = null;
+    this.lastLineDiv = null;
+    this.lastLineDupCount = 1;
+    // Drop anything buffered while paused.
+    this.heldFragment = document.createDocumentFragment();
+    this.heldCount = 0;
+    this.heldDropped = 0;
+    if (this.paused) this.notifyPauseChange();
   }
 
   /** Toggle chart view. Returns true if chart is now visible. */
@@ -647,5 +711,83 @@ export class TerminalUI {
     if (n < 1024) return `${n}`;
     if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)}K`;
     return `${(n / (1024 * 1024)).toFixed(1)}M`;
+  }
+
+  /** Toggle pause state. Returns the new paused state. */
+  togglePause(): boolean {
+    if (this.paused) this.resume();
+    else this.pause();
+    return this.paused;
+  }
+
+  /** Pause rendering. New lines buffer in a held fragment until resume(). */
+  pause(): void {
+    if (this.paused) return;
+    this.paused = true;
+    this.notifyPauseChange();
+  }
+
+  /** Resume rendering and flush everything buffered while paused. */
+  resume(): void {
+    if (!this.paused) return;
+    this.paused = false;
+
+    if (this.heldCount > 0) {
+      this.output.appendChild(this.heldFragment);
+      this.heldFragment = document.createDocumentFragment();
+    }
+    if (this.heldDropped > 0) {
+      const div = document.createElement("div");
+      div.className = "line system";
+      const text = document.createElement("span");
+      text.className = "text";
+      text.textContent = `[${this.heldDropped} lines dropped while paused — buffer cap ${TerminalUI.MAX_HELD}]`;
+      div.appendChild(text);
+      this.output.appendChild(div);
+      // Inserting a system line breaks the dup chain.
+      this.lastLineKey = null;
+      this.lastLineDiv = null;
+    }
+    this.heldCount = 0;
+    this.heldDropped = 0;
+
+    if (this.searchActive) {
+      const lines = this.output.querySelectorAll(".line:not([data-searched])");
+      for (const div of Array.from(lines)) {
+        (div as HTMLElement).setAttribute("data-searched", "1");
+        this.applySearchToLine(div as HTMLElement);
+      }
+    }
+
+    this.trimAndScroll();
+    this.notifyPauseChange();
+  }
+
+  isPaused(): boolean {
+    return this.paused;
+  }
+
+  heldLineCount(): number {
+    return this.heldCount;
+  }
+
+  /** Register a callback fired whenever pause state or held count changes. */
+  setPauseChangeHandler(handler: (paused: boolean, heldCount: number) => void): void {
+    this.onPauseChange = handler;
+  }
+
+  private notifyPauseChange(): void {
+    this.onPauseChange?.(this.paused, this.heldCount);
+  }
+
+  /** Update (or add) the × N counter span on a line div. */
+  private updateDupCount(div: HTMLElement): void {
+    let counter = div.querySelector(".dup-count") as HTMLElement | null;
+    if (!counter) {
+      counter = document.createElement("span");
+      counter.className = "dup-count";
+      div.appendChild(counter);
+    }
+    counter.textContent = `× ${this.lastLineDupCount}`;
   }
 }
