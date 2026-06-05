@@ -169,7 +169,12 @@ function createTab(label: string, tooltip?: string, kind: TabKind = "serial"): T
   tabBtn.appendChild(tabIcon);
   tabBtn.appendChild(tabLabel);
   tabBtn.appendChild(closeBtn);
-  tabBtn.addEventListener("click", () => switchTab(id));
+  tabBtn.addEventListener("click", (e) => {
+    // Defense against pointerdown-drift: if the click landed inside the close
+    // button's hit area, only closeBtn's handler should run — never switch tabs.
+    if ((e.target as HTMLElement).closest(".tab-close")) return;
+    switchTab(id);
+  });
 
   // Insert before the "+" button.
   tabBar.insertBefore(tabBtn, newTabBtn);

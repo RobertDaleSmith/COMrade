@@ -607,10 +607,16 @@ body {
   color: var(--fg-tertiary);
   cursor: pointer;
   line-height: 1;
+  /* Pad the hit area so the click target is ~22x22 instead of the 7x14 glyph.
+     Negative margin keeps the surrounding layout unchanged. */
+  padding: 4px 6px;
+  margin: -4px -6px;
+  border-radius: 3px;
 }
 
 .tab-close:hover {
   color: var(--accent-red);
+  background: var(--bg-elevated);
 }
 
 #new-tab-btn {
