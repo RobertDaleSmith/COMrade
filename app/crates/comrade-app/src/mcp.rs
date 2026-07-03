@@ -48,6 +48,19 @@ pub struct SendSerialParams {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct SendBytesParams {
+    #[schemars(description = "Tab ID. If omitted, uses the first active connection.")]
+    pub tab_id: Option<String>,
+    #[schemars(
+        description = "Hex-encoded bytes to send (whitespace, ':', ',', '-', '_' and '0x' prefixes are stripped). \
+                       Example: \"AA0D01007B22636D64223A22...\" or \"AA 0D 01 00\". \
+                       Bytes are written verbatim with NO trailing newline — use this for binary protocols \
+                       (framed protocols with CRCs, Modbus, MIDI, DFU triggers, etc.)."
+    )]
+    pub hex: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct SendHidReportParams {
     #[schemars(description = "Tab ID. If omitted, uses the first active connection.")]
     pub tab_id: Option<String>,
@@ -110,6 +123,37 @@ fn resolve_tab_id(app: &crate::commands::AppState, tab_id: Option<&str>) -> Resu
     app.tabs.keys().next().cloned().ok_or_else(|| {
         McpError::invalid_request("No active connections".to_string(), None)
     })
+}
+
+/// Parse a hex string into bytes. Tolerates whitespace, ':' / ',' / '-' / '_' separators,
+/// and `0x`/`0X` prefixes. Rejects odd nibble counts and non-hex characters.
+fn decode_hex(input: &str) -> Result<Vec<u8>, String> {
+    let mut cleaned = String::with_capacity(input.len());
+    for ch in input.chars() {
+        if ch.is_whitespace() || matches!(ch, ':' | ',' | '-' | '_') {
+            continue;
+        }
+        cleaned.push(ch);
+    }
+    let cleaned = cleaned.replace("0x", "").replace("0X", "");
+    if cleaned.is_empty() {
+        return Ok(Vec::new());
+    }
+    if !cleaned.len().is_multiple_of(2) {
+        return Err(format!(
+            "expected an even number of hex nibbles, got {}",
+            cleaned.len()
+        ));
+    }
+    let mut out = Vec::with_capacity(cleaned.len() / 2);
+    let bytes = cleaned.as_bytes();
+    for i in (0..bytes.len()).step_by(2) {
+        let pair = std::str::from_utf8(&bytes[i..i + 2]).unwrap();
+        let byte = u8::from_str_radix(pair, 16)
+            .map_err(|e| format!("bad hex \"{pair}\" at offset {i}: {e}"))?;
+        out.push(byte);
+    }
+    Ok(out)
 }
 
 /// Helper: collect log buffers from tabs.
@@ -233,32 +277,18 @@ impl ComradeMcp {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(description = "List available serial and HID devices that can be connected to.")]
-    fn list_devices(&self) -> Result<CallToolResult, McpError> {
-        let devices = comrade_core::enumerate_devices()
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-
-        let filtered: Vec<_> = devices
-            .into_iter()
-            .filter(|d| {
-                if let Some(ref sp) = d.serial_path {
-                    if sp == "/dev/cu.debug-console" || sp == "/dev/cu.Bluetooth-Incoming-Port" {
-                        return false;
-                    }
-                }
-                if d.kind == comrade_protocol::DeviceKind::Hid {
-                    if d.vid == Some(0x05AC) {
-                        return false;
-                    }
-                    if d.vid == Some(0x0000) && d.pid == Some(0x0000) {
-                        return false;
-                    }
-                }
-                true
-            })
-            .collect();
-
-        let json = serde_json::to_string_pretty(&filtered).unwrap_or_default();
+    #[tool(description = "List available serial, HID, and BLE devices. Includes a BLE scan for peripherals \
+                          advertising the Nordic UART Service (NUS) — those entries populate `ble_id` \
+                          (a UUID) and set `kind` to \"ble\". To connect over BLE, pass that entry's \
+                          `path` (of the form `ble://<uuid>`) with `connection_type: \"ble_nus\"` to connect_device.")]
+    async fn list_devices(&self) -> Result<CallToolResult, McpError> {
+        // Delegate to the same merged enumeration the GUI uses: HID/Serial + BLE scan
+        // + Bluetooth-HID BLE merge. Fixes the historical MCP gap where `ble_id` was
+        // never populated because the BLE scan was skipped for MCP consumers.
+        let devices = crate::commands::list_devices()
+            .await
+            .map_err(|e| McpError::internal_error(e, None))?;
+        let json = serde_json::to_string_pretty(&devices).unwrap_or_default();
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
@@ -435,6 +465,82 @@ impl ComradeMcp {
                     .await
                     .map_err(|e| McpError::internal_error(e, None))?;
             }
+            #[cfg(target_os = "macos")]
+            ActiveConnection::NativeBleNus { session } => {
+                let mut data = params.text.into_bytes();
+                data.push(b'\n');
+                session
+                    .send(data)
+                    .await
+                    .map_err(|e| McpError::internal_error(e, None))?;
+            }
+            _ => {
+                return Err(McpError::invalid_request(
+                    "Not connected (serial/NUS)".to_string(),
+                    None,
+                ))
+            }
+        }
+
+        Ok(CallToolResult::success(vec![Content::text("Sent.")]))
+    }
+
+    #[tool(description = "Send raw bytes to a connected serial or BLE NUS device WITHOUT appending a newline. \
+                          Use this for binary protocols where a trailing 0x0A would corrupt the frame — \
+                          framed protocols with headers/CRCs, Modbus RTU, MIDI, DFU trigger frames, etc. \
+                          For plain text with a newline, use send_serial instead.")]
+    async fn send_bytes(
+        &self,
+        Parameters(params): Parameters<SendBytesParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let bytes = decode_hex(&params.hex)
+            .map_err(|e| McpError::invalid_request(format!("hex: {e}"), None))?;
+        if bytes.is_empty() {
+            return Err(McpError::invalid_request(
+                "hex parsed to zero bytes".to_string(),
+                None,
+            ));
+        }
+
+        let app = self.shared_state.lock().await;
+        let tab_id = resolve_tab_id(&app, params.tab_id.as_deref())?;
+        let tab = app.tabs.get(&tab_id).unwrap();
+
+        // Log an [MCP] line showing the hex we're about to write.
+        let display: Vec<String> = bytes.iter().map(|b| format!("{b:02X}")).collect();
+        let mcp_line = SerialLine {
+            timestamp: Local::now().format("%H:%M:%S%.3f").to_string(),
+            text: format!("<{} bytes> {}", bytes.len(), display.join(" ")),
+            kind: "mcp",
+            rx_bytes_total: 0,
+        };
+        tab.log_buffer.push(LogEntry::Serial(mcp_line.clone()));
+        if let Some(ref ch) = tab.line_channel {
+            let _ = ch.send(mcp_line);
+        }
+
+        match &tab.connection {
+            ActiveConnection::Serial { client, .. } => {
+                let sender = client.cmd_sender();
+                drop(app);
+                sender
+                    .send(Command::Send { data: bytes })
+                    .await
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+            }
+            ActiveConnection::BleNus { session } => {
+                session
+                    .send(bytes)
+                    .await
+                    .map_err(|e| McpError::internal_error(e, None))?;
+            }
+            #[cfg(target_os = "macos")]
+            ActiveConnection::NativeBleNus { session } => {
+                session
+                    .send(bytes)
+                    .await
+                    .map_err(|e| McpError::internal_error(e, None))?;
+            }
             _ => {
                 return Err(McpError::invalid_request(
                     "Not connected (serial/NUS)".to_string(),
@@ -482,12 +588,16 @@ impl ServerHandler for ComradeMcp {
             ))
             .with_protocol_version(ProtocolVersion::V_2025_03_26)
             .with_instructions(
-                "COMrade serial/HID monitor with tabbed connections. Use get_status \
+                "COMrade serial/HID/BLE monitor with tabbed connections. Use get_status \
                  to see active tabs and their connections, get_logs/search_logs to \
                  read device output (optionally filtered by tab_id), list_devices to \
-                 see available ports, clear_logs to reset log buffers, send_serial \
-                 to send text to a serial device, and send_hid_report to send a HID \
-                 report. All send commands require a tab_id."
+                 see available ports including BLE NUS peripherals (their entries have \
+                 ble_id set and path=ble://<uuid>), clear_logs to reset log buffers, \
+                 connect_device to open a tab (connection_type: serial|hid|ble_nus), \
+                 send_serial to send TEXT with an appended newline, send_bytes to send \
+                 RAW hex-encoded bytes (no newline, for binary protocols/DFU triggers/CRCs), \
+                 and send_hid_report to send a HID report. All send commands accept an \
+                 optional tab_id — omit it to target the first active connection."
                     .to_string(),
             )
     }
@@ -523,5 +633,59 @@ pub async fn start_mcp_server(shared_state: SharedState) {
         Err(e) => {
             warn!("MCP server failed to bind 127.0.0.1:9712: {e} (continuing without MCP)");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_hex;
+
+    #[test]
+    fn decode_hex_compact() {
+        assert_eq!(decode_hex("AA0D01").unwrap(), vec![0xAA, 0x0D, 0x01]);
+    }
+
+    #[test]
+    fn decode_hex_with_whitespace_and_separators() {
+        // Spaces, colons, dashes, and mixed case all get normalized.
+        assert_eq!(
+            decode_hex("aa 0d:01-ff_00").unwrap(),
+            vec![0xAA, 0x0D, 0x01, 0xFF, 0x00]
+        );
+    }
+
+    #[test]
+    fn decode_hex_with_0x_prefix() {
+        assert_eq!(
+            decode_hex("0xAA 0x0D 0x01").unwrap(),
+            vec![0xAA, 0x0D, 0x01]
+        );
+    }
+
+    #[test]
+    fn decode_hex_full_ota_frame() {
+        // The exact OTA trigger frame from the joypad-os spec.
+        let bytes = decode_hex("AA0D0001007B22636D64223A224F5441227D08D2").unwrap();
+        assert_eq!(bytes.len(), 20);
+        assert_eq!(bytes[0], 0xAA); // header
+        assert_eq!(bytes[18..], [0x08, 0xD2]); // CRC-CCITT
+    }
+
+    #[test]
+    fn decode_hex_rejects_odd_nibbles() {
+        assert!(decode_hex("AAB").is_err());
+    }
+
+    #[test]
+    fn decode_hex_rejects_non_hex() {
+        assert!(decode_hex("AAGG").is_err());
+    }
+
+    #[test]
+    fn decode_hex_empty_is_zero_bytes() {
+        // Empty after cleanup — the send_bytes tool rejects zero-length; decode itself just
+        // returns an empty Vec so the caller can decide.
+        assert_eq!(decode_hex("").unwrap(), Vec::<u8>::new());
+        assert_eq!(decode_hex("  ").unwrap(), Vec::<u8>::new());
     }
 }
