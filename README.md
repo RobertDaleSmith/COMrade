@@ -133,13 +133,29 @@ make firmware-w                      # Pico W build (BLE NUS)
 
 COMrade includes a built-in MCP server that lets Claude Code interact with connected devices.
 
-```bash
-# One-time setup — add COMrade as an MCP server
-claude mcp add --transport http comrade http://127.0.0.1:9712/mcp
+Two ways to wire it up. **Pick one — don't do both**; they conflict.
 
-# Start COMrade before launching Claude Code
-# Claude can then list devices, open connections, read logs, and send commands
+### Option A: Auto-configured via `.mcp.json` (recommended for this repo)
+
+A project-scoped MCP server is already committed to `.mcp.json`. It spawns the
+built binary directly, so you need to build it once first:
+
+```bash
+cd app && cargo build --bin comrade
 ```
+
+Then open Claude Code in the repo root and approve the `comrade` MCP server when
+prompted. The server auto-starts as a headless daemon on port 9712 (or bridges
+to a running COMrade GUI if there is one).
+
+### Option B: HTTP transport (any directory, needs COMrade running)
+
+```bash
+claude mcp add --transport http comrade http://127.0.0.1:9712/mcp
+```
+
+Launch COMrade (GUI or `cargo run --bin comrade -- --mcp`) before starting Claude
+Code so port 9712 is up.
 
 ## CLI Reference
 

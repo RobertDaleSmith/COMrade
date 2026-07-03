@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "comrade": {
-      "command": "cargo",
-      "args": ["run", "--bin", "comrade", "--", "--mcp"],
+      "command": "./target/debug/comrade",
+      "args": ["--mcp"],
       "cwd": "app"
     }
   }
